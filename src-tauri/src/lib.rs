@@ -305,6 +305,30 @@ async fn query_capabilities(app: AppHandle) -> Result<QueryCapabilities, String>
     .await
 }
 
+/// The values one column can take, when `Info.xml` defines a type for it.
+///
+/// `null` means the column is free text: the filter UI keeps a text field for it
+/// instead of offering a list of choices.
+#[tauri::command]
+async fn act_column_values(
+    app: AppHandle,
+    column: String,
+    limit: Option<i64>,
+) -> Result<Option<Vec<store::ColumnValue>>, String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        let schema = store
+            .load_schema()
+            .map_err(|e| format!("{e:#}"))?
+            .unwrap_or_else(empty_schema);
+        store
+            .column_values(&schema, &column, limit.unwrap_or(200))
+            .map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
 /// Resolve a filterable/sortable column to the label `Info.xml` gives it.
 fn capabilities(schema: &Schema) -> QueryCapabilities {
     let labels = schema
@@ -541,6 +565,7 @@ pub fn run() {
             search_acts,
             act_detail,
             act_facets,
+            act_column_values,
             query_capabilities,
             search_files,
             get_email_settings,

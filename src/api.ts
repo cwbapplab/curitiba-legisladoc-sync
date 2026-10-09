@@ -50,10 +50,30 @@ export interface SearchResult {
 /** The filter operators the backend enforces. */
 export type Op = "eq" | "ne" | "like" | "gte" | "lte";
 
+/** How a condition joins the one before it. */
+export type Logic = "and" | "or";
+
 export interface Filter {
   column: string;
   op: Op;
+  /** The primary value. Kept first to match the backend's field. */
   value: string;
+  /** Extra values, making the condition an "is one of". */
+  values?: string[];
+  /** Join with the previous condition; `and` when omitted. */
+  logic?: Logic;
+}
+
+/**
+ * One value a column can take, with the label to show for it.
+ *
+ * Present only when `Info.xml` defines a type for the column — an enum's values
+ * or a foreign key's dimension rows. A free column has no list, and the filter
+ * UI keeps a text field for it.
+ */
+export interface ColumnValue {
+  value: string;
+  label: string;
 }
 
 export interface ActQuery {
@@ -213,6 +233,9 @@ export const actDetail = (id: number) =>
   invoke<ActDetail | null>("act_detail", { id });
 export const actFacets = (column: string, limit = 40) =>
   invoke<Facet[]>("act_facets", { column, limit });
+/** The column's defined values, or `null` when it has no defined type. */
+export const actColumnValues = (column: string, limit = 200) =>
+  invoke<ColumnValue[] | null>("act_column_values", { column, limit });
 export const queryCapabilities = () =>
   invoke<QueryCapabilities>("query_capabilities");
 

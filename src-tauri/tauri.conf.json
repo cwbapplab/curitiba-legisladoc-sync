@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Legisladoc Browser",
+  "productName": "Legisladoc Sync",
   "version": "0.1.0",
-  "identifier": "com.legisladoc.browser",
+  "identifier": "com.cwbapplab.legisladoc-sync",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Legisladoc Browser",
+        "title": "Legisladoc Sync",
         "width": 1280,
         "height": 820,
         "minWidth": 900,

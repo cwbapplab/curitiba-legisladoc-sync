@@ -1,4 +1,4 @@
-import { ReactNode } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 
 /**
  * Peças do GOVBR-DS usadas em mais de uma tela.
@@ -75,6 +75,41 @@ export function Loading({ label = "Carregando", inline }: LoadingProps) {
 }
 
 /**
+ * Anel de progresso determinado.
+ *
+ * Não é o `br-loading[data-progress]` do design system: na versão 3.7.0, a
+ * única publicada até aqui, esse componente está quebrado. As faixas que
+ * deveriam traçar o arco ficam
+ * desalinhadas do anel — o cinza aparece deslocado meia volta à esquerda e o
+ * azul escorre para fora da circunferência, formando uma lua crescente. O
+ * defeito é do próprio pacote, não da aplicação: a marcação de exemplo que vem
+ * em `dist/components/loading/examples/loading-progress.html`, copiada tal e
+ * qual para uma página em branco, desenha a mesma lua.
+ *
+ * O anel daqui usa `conic-gradient` com uma máscara radial — dois recursos que
+ * o WebView da aplicação já domina. O traço tem a mesma espessura de 5px do
+ * componente original, para o desenho não mudar de peso.
+ */
+function ProgressRing({ value, label }: { value: number; label: string }) {
+  return (
+    <span
+      className="preload-ring"
+      role="progressbar"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={value}
+      aria-label={label}
+      // O ângulo do arco sai daqui: `conic-gradient` não aceita a divisão
+      // dentro do CSS, então o valor chega pronto como ângulo.
+      style={{ ["--ring-angle" as string]: `${value * 3.6}deg` }}
+    >
+      <span className="preload-ring-arc" />
+      <span className="preload-ring-value">{value}%</span>
+    </span>
+  );
+}
+
+/**
  * Tela de preparação do acervo.
  *
  * Só aparece quando não há nenhum ato guardado e a origem ainda está sendo
@@ -82,10 +117,9 @@ export function Loading({ label = "Carregando", inline }: LoadingProps) {
  * tela de atos ficava vazia enquanto 1,4 GB desciam, sem dizer nada; aqui o
  * carregamento é o próprio conteúdo.
  *
- * O anel é o `br-loading` do design system com `data-progress`: ele desenha o
- * percentual e a fatia preenchida. Como o design system não tem um componente
- * de barra de progresso nesta versão, a barra fina abaixo é feita com os tokens
- * dele — mesma cor de interação, mesma altura de traço.
+ * Como o design system não tem um componente de barra de progresso nesta
+ * versão, a barra fina abaixo do anel é feita com os tokens dele — mesma cor de
+ * interação, mesma altura de traço.
  */
 export function Preload({
   title,
@@ -104,27 +138,13 @@ export function Preload({
     <div className="preload" role="status" aria-live="polite">
       <div className="preload-card">
         {value === null ? (
-          <span className="br-loading medium preload-ring" />
+          /*
+           * Total ainda desconhecido: o anel gira sem número, no lugar de
+           * afirmar um percentual que ainda não existe.
+           */
+          <span className="preload-ring preload-ring-spin" />
         ) : (
-          <span
-            className="br-loading preload-ring"
-            // O anel do design system lê o percentual deste atributo: é ele que
-            // escolhe a fatia preenchida e desenha o número no centro. O
-            // `aria-valuenow` sozinho não basta — o CSS só olha `data-progress`.
-            data-progress={value}
-            role="progressbar"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={value}
-            aria-label={`${title} ${value}%`}
-          >
-            <span className="br-loading-mask full">
-              <span className="br-loading-fill" />
-            </span>
-            <span className="br-loading-mask">
-              <span className="br-loading-fill" />
-            </span>
-          </span>
+          <ProgressRing value={value} label={`${title} ${value}%`} />
         )}
 
         <h1 className="preload-title">{title}</h1>
@@ -334,6 +354,119 @@ export function Select({
   );
 }
 
+/**
+ * Escolha de vários valores de uma lista fechada.
+ *
+ * Um `<select multiple>` nativo é desconfortável — a seleção depende de
+ * Ctrl+clique e a lista some ao fechar —, então isto é um popover de caixas de
+ * seleção sobre um botão que resume o que está escolhido. As classes são
+ * próprias (`multi-*`) em vez das do design system: `.br-input` e `.br-list`
+ * esperam por dentro um `<input>` e itens navegáveis, e reaproveitá-las para um
+ * botão e caixas de seleção seria brigar com o CSS delas. Os tokens de cor,
+ * borda e altura são os mesmos, então o desenho continua o do sistema.
+ *
+ * O resumo no gatilho é a única indicação de estado com o painel fechado, por
+ * isso ele nunca fica vazio: sem escolha diz "Todos", que é o que a condição
+ * significa (nenhum valor restringe a busca).
+ */
+export function MultiSelect({
+  id,
+  label,
+  options,
+  values,
+  onChange,
+  disabled,
+}: {
+  id: string;
+  label: string;
+  options: { value: string; label: string }[];
+  values: string[];
+  onChange: (values: string[]) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+
+  // Fecha ao clicar fora ou com Escape — um popover que só fecha pelo próprio
+  // gatilho prende o usuário dentro dele.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!root.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const toggle = (v: string) =>
+    onChange(values.includes(v) ? values.filter((x) => x !== v) : [...values, v]);
+
+  const summary =
+    values.length === 0
+      ? "Todos"
+      : values.length === 1
+      ? options.find((o) => o.value === values[0])?.label ?? values[0]
+      : `${values.length} selecionados`;
+
+  return (
+    <div className="multi-select" ref={root}>
+      <button
+        id={id}
+        type="button"
+        className="multi-trigger"
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`${label}: ${summary}`}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="multi-summary">{summary}</span>
+        <Icon name={open ? "chevron-up" : "chevron-down"} />
+      </button>
+      {open && (
+        <div
+          className="multi-panel"
+          role="listbox"
+          aria-multiselectable="true"
+          aria-label={label}
+        >
+          {options.map((o) => {
+            const on = values.includes(o.value);
+            return (
+              <div
+                key={o.value}
+                className="multi-item"
+                role="option"
+                aria-selected={on}
+                tabIndex={0}
+                onClick={() => toggle(o.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    toggle(o.value);
+                  }
+                }}
+              >
+                <span className={on ? "multi-check on" : "multi-check"} aria-hidden="true">
+                  {on && <Icon name="check" />}
+                </span>
+                <span className="multi-label">{o.label}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** `br-divider` — separador de seções. */
 export function Divider({ vertical }: { vertical?: boolean }) {
   return (
@@ -365,6 +498,9 @@ export type IconName =
   | "exclamation"
   | "chevron-left"
   | "chevron-right"
+  | "chevron-down"
+  | "chevron-up"
+  | "check"
   | "refresh"
   | "file"
   | "cog"
@@ -417,6 +553,9 @@ export function Icon({ name }: { name: IconName }) {
     ),
     "chevron-left": <path d="M15 5l-7 7 7 7" />,
     "chevron-right": <path d="M9 5l7 7-7 7" />,
+    "chevron-down": <path d="M5 9l7 7 7-7" />,
+    "chevron-up": <path d="M5 15l7-7 7 7" />,
+    check: <path d="M5 12.5l4.5 4.5L19 7.5" />,
     refresh: (
       <>
         <path d="M20 12a8 8 0 1 1-2.6-5.9" />

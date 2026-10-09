@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  ColumnValue,
   EmailLogEntry,
   EmailRule,
   EmailRuleInput,
@@ -7,8 +8,10 @@ import {
   EmailSettingsInput,
   EmailStatus,
   Filter,
+  Logic,
   Op,
   QueryCapabilities,
+  actColumnValues,
   deleteEmailRule,
   formatDate,
   getEmailSettings,
@@ -29,6 +32,7 @@ import {
   Input,
   Loading,
   Message,
+  MultiSelect,
   Select,
   Tag,
   Toggle,
@@ -321,19 +325,188 @@ function ConditionSummary({
     caps?.labels.find(([c]) => c === column)?.[1] ?? column;
   const op = (o: Op) => OPS.find((x) => x.value === o)?.label ?? o;
 
-  const parts = rule.filters.map(
-    (f) => `${label(f.column)} ${op(f.op)} “${f.value}”`
-  );
+  // Os valores extras entram na frase como "“A” ou “B”" — é assim que a
+  // condição realmente casa, já que vários valores são um "é um destes".
+  const parts = rule.filters.map((f) => {
+    const all = [f.value, ...(f.values ?? [])].filter((v) => v.trim());
+    const quoted =
+      all.length === 0
+        ? "…"
+        : all.length === 1
+        ? `“${all[0]}”`
+        : all.map((v) => `“${v}”`).join(" ou ");
+    return `${label(f.column)} ${op(f.op)} ${quoted}`;
+  });
+  // O termo de texto é uma condição "e" a mais, antes de todas as outras.
   if (rule.text) parts.unshift(`texto contém “${rule.text}”`);
+
+  // Cada condição a partir da segunda vem precedida do seu conector; "e" é o
+  // padrão do banco, e escrevê-lo entre todas as condições poluiria a frase sem
+  // informar nada. O deslocamento desconta o termo de texto, que entra como uma
+  // condição "e" a mais e não tem conector próprio.
+  const offset = rule.text ? 1 : 0;
+  const phrase = parts
+    .map((p, i) => {
+      const condition = i - offset;
+      // A primeira condição não se liga a nada — o `logic` dela é ignorado pelo
+      // banco, então também não é mostrado.
+      if (condition < 1) return p;
+      return rule.filters[condition]?.logic === "or" ? `ou ${p}` : p;
+    })
+    .join(" · ");
 
   return (
     <span className="ellipsis" title={parts.join(" · ")}>
-      {parts.length ? parts.join(" · ") : "Todos os atos novos"}
+      {parts.length ? phrase : "Todos os atos novos"}
     </span>
   );
 }
 
 /* --------------------------------------------------------------- edit rule */
+
+/**
+ * Uma condição da regra.
+ *
+ * A coluna decide o resto: quando `Info.xml` define um tipo para ela, o valor
+ * vem de uma lista (um enum ou uma tabela de domínio) e o campo de texto vira
+ * uma escolha múltipla; quando não define, continua livre. É por isso que o
+ * componente busca a lista ao montar e a cada troca de coluna — a consulta é
+ * local e barata, e mantém o valor oferecido igual ao que o banco aceita.
+ *
+ * O conector (e/ou) fica na mesma linha da condição, à esquerda, mas só existe
+ * a partir da segunda: a primeira não tem com o que se ligar.
+ */
+function ConditionRow({
+  index,
+  filter,
+  columns,
+  labelOf,
+  onChange,
+  onRemove,
+}: {
+  index: number;
+  filter: Filter;
+  columns: { value: string; label: string }[];
+  labelOf: (column: string) => string;
+  onChange: (patch: Partial<Filter>) => void;
+  onRemove: () => void;
+}) {
+  const [defs, setDefs] = useState<ColumnValue[] | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    if (!filter.column) {
+      setDefs(null);
+      return;
+    }
+    actColumnValues(filter.column)
+      .then((v) => {
+        if (alive) setDefs(v);
+      })
+      // Sem lista é o caso normal (coluna livre); a falha cai no mesmo lugar
+      // que ele, ou seja, no campo de texto.
+      .catch(() => {
+        if (alive) setDefs(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [filter.column]);
+
+  // Operadores de comparação ("contém", "maior", "menor") não têm lista: uma
+  // enumeração só descreve igualdade e diferença.
+  const listOk = filter.op === "eq" || filter.op === "ne";
+  const useList = listOk && !!defs && defs.length > 0;
+
+  // Ao trocar de coluna o valor antigo não vale mais para a nova.
+  const changeColumn = (column: string) => onChange({ column, value: "", values: [] });
+
+  // Os operadores de comparação usam só o primeiro valor; ao entrar num deles,
+  // os extras são descartados em vez de ficarem escondidos e ainda irem para o
+  // banco na próxima gravação.
+  const changeOp = (op: Op) =>
+    onChange(op === "eq" || op === "ne" ? { op } : { op, values: [] });
+
+  // A escolha múltipla trabalha com um vetor só; o primeiro vai para `value`,
+  // que é o campo que o banco sempre teve, e o resto para `values`.
+  const chosen = [filter.value, ...(filter.values ?? [])].filter((v) => v.trim());
+  const setChosen = (all: string[]) => onChange({ value: all[0] ?? "", values: all.slice(1) });
+
+  // Um valor guardado pode não estar mais na lista (a tabela de domínio não
+  // veio no último *refresh*, por exemplo). Sem isto ele sumiria da tela e o
+  // usuário salvaria uma regra que não vê.
+  const options = useList
+    ? [
+        ...defs!.map((d) => ({ value: d.value, label: d.label })),
+        ...chosen
+          .filter((v) => !defs!.some((d) => d.value === v))
+          .map((v) => ({ value: v, label: v })),
+      ]
+    : [];
+
+  return (
+    <div className="rule-filter">
+      <div className="rule-logic">
+        {index > 0 ? (
+          <Select
+            id={`filtro-logic-${index}`}
+            label="Conector"
+            value={filter.logic ?? "and"}
+            onChange={(v) => onChange({ logic: v as Logic })}
+            options={[
+              { value: "and", label: "E" },
+              { value: "or", label: "OU" },
+            ]}
+          />
+        ) : (
+          <span className="rule-logic-spacer" aria-hidden="true" />
+        )}
+      </div>
+
+      <Select
+        id={`filtro-col-${index}`}
+        label="Coluna"
+        value={filter.column}
+        onChange={changeColumn}
+        options={[
+          { value: filter.column, label: labelOf(filter.column) },
+          ...columns.filter((c) => c.value !== filter.column),
+        ]}
+      />
+      <Select
+        id={`filtro-op-${index}`}
+        label="Operador"
+        value={filter.op}
+        onChange={(v) => changeOp(v as Op)}
+        options={OPS}
+      />
+
+      <div className="rule-value">
+        {useList ? (
+          <MultiSelect
+            id={`filtro-val-${index}`}
+            label="Valor"
+            options={options}
+            values={chosen}
+            onChange={setChosen}
+          />
+        ) : (
+          <Input
+            id={`filtro-val-${index}`}
+            value={filter.value}
+            onChange={(v) => onChange({ value: v, values: [] })}
+            label="Valor"
+            placeholder="Valor"
+          />
+        )}
+      </div>
+
+      <Button circle density="small" ariaLabel="Remover condição" onClick={onRemove}>
+        <Icon name="close" />
+      </Button>
+    </div>
+  );
+}
 
 function RuleDrawer({
   rule,
@@ -440,47 +613,29 @@ function RuleDrawer({
           <Field label="Condições">
             <div className="rule-filters">
               {filters.map((f, i) => (
-                <div className="rule-filter" key={i}>
-                  <Select
-                    id={`filtro-col-${i}`}
-                    label="Coluna"
-                    value={f.column}
-                    onChange={(v) => setFilter(i, { column: v })}
-                    options={[
-                      { value: f.column, label: labelOf(caps, f.column) },
-                      ...columns.filter((c) => c.value !== f.column),
-                    ]}
-                  />
-                  <Select
-                    id={`filtro-op-${i}`}
-                    label="Operador"
-                    value={f.op}
-                    onChange={(v) => setFilter(i, { op: v as Op })}
-                    options={OPS}
-                  />
-                  <Input
-                    id={`filtro-val-${i}`}
-                    value={f.value}
-                    onChange={(v) => setFilter(i, { value: v })}
-                    label="Valor"
-                    placeholder="Valor"
-                  />
-                  <Button
-                    circle
-                    density="small"
-                    ariaLabel="Remover condição"
-                    onClick={() => setFilters((fs) => fs.filter((_, j) => j !== i))}
-                  >
-                    <Icon name="close" />
-                  </Button>
-                </div>
+                <ConditionRow
+                  key={i}
+                  index={i}
+                  filter={f}
+                  columns={columns}
+                  labelOf={(c) => labelOf(caps, c)}
+                  onChange={(patch) => setFilter(i, patch)}
+                  onRemove={() => setFilters((fs) => fs.filter((_, j) => j !== i))}
+                />
               ))}
               <Button
                 density="small"
                 onClick={() =>
                   setFilters((fs) => [
                     ...fs,
-                    { column: columns[0]?.value ?? "", op: "eq" as Op, value: "" },
+                    {
+                      column: columns[0]?.value ?? "",
+                      op: "eq" as Op,
+                      value: "",
+                      // "e" é o padrão do banco; declarado aqui para a UI e o
+                      // que ela salva nunca divergirem.
+                      logic: "and" as Logic,
+                    },
                   ])
                 }
                 disabled={columns.length === 0}

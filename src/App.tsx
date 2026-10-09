@@ -14,7 +14,8 @@ import {
 import ActsView from "./ActsView";
 import EmailView from "./EmailView";
 import ExplorerView from "./ExplorerView";
-import { Button, Icon, Message, Preload, Select } from "./components";
+import { Button, Message, Preload, Select } from "./components";
+import logo from "./cwb-logo.svg";
 
 /** Cadências oferecidas no seletor de atualização automática. */
 const INTERVAL_CHOICES = [15, 30, 60, 180, 720];
@@ -179,9 +180,15 @@ export default function App() {
         <div className="container-fluid">
           <div className="header-top">
             <div className="header-logo">
-              <Icon name="file" />
+              {/*
+                A marca ocupa o lugar do ícone genérico que havia aqui. Como o
+                arquivo é um SVG de traço fino, ele fica em `img` — e não
+                inline — para não repetir 780 kB de caminhos no bundle JS: o
+                arquivo é servido uma vez e ainda entra no cache do webview.
+              */}
+              <img className="brand-mark" src={logo} alt="" />
               <div className="header-sign">
-                <div className="app-title">Legisladoc</div>
+                <div className="app-title">Legisladoc Sync</div>
                 <div className="app-subtitle">
                   Base de atos da Prefeitura de Curitiba
                 </div>

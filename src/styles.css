@@ -79,8 +79,26 @@ body {
 
 /* O cabeçalho do design system é de página, não de aplicativo: ocupa a altura
    que precisar, sem esticar. */
+/* O design system limita o logotipo do cabeçalho por `--header-logo-size`
+   (40px já na faixa de desktop). O token é reajustado aqui em vez de estilar a
+   imagem direto: a regra que aplica o limite tem especificidade maior que
+   qualquer classe nossa, então uma altura própria seria ignorada. */
 .br-header .header-logo {
   align-items: center;
+  --header-logo-size: 48px;
+}
+
+/*
+ * A marca do Legisladoc. Como o desenho é mais alto que largo — ao contrário
+ * da assinatura de governo, larga e baixa —, sobra largura e não falta: só a
+ * altura é fixada, e a largura fica em `auto` para a proporção se manter.
+ *
+ * O SVG tem fundo transparente fora da arte — o branco do desenho é tinta,
+ * não recorte —, então ele fica direto sobre o fundo do cabeçalho.
+ */
+.brand-mark {
+  width: auto;
+  flex-shrink: 0;
 }
 
 .app-title {
@@ -260,11 +278,75 @@ body {
   text-align: center;
 }
 
-/* O anel com `data-progress` precisa ser filho posicionado do próprio anel. */
+/*
+ * Anel de progresso. O `conic-gradient` desenha o arco num quadrado que a
+ * máscara radial recorta em anel; sem a máscara sairia uma pizza cheia.
+ *
+ * O traço de 5px é o mesmo do `br-loading` do design system, para o desenho
+ * manter o peso. A espessura aparece duas vezes — no recorte da máscara e no
+ * `farthest-side` —, então vive numa variável só.
+ */
 .preload-ring {
+  --ring-stroke: 5px;
   position: relative;
+  display: grid;
+  place-items: center;
+  width: 84px;
+  height: 84px;
   flex-shrink: 0;
   margin-bottom: var(--spacing-scale-base);
+}
+
+.preload-ring-arc {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  /* A fatia preenchida começa no topo, como num relógio, e segue no sentido
+     horário. O arco e o trilho são o mesmo gradiente: o segundo trecho, de
+     `--ring-angle` até 360°, é o que falta. */
+  background: conic-gradient(
+    var(--interactive) var(--ring-angle),
+    var(--color-secondary-03) 0
+  );
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - var(--ring-stroke)),
+    #000 0
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - var(--ring-stroke)),
+    #000 0
+  );
+}
+
+.preload-ring-value {
+  position: relative;
+  z-index: 1;
+  color: var(--interactive);
+  font-size: var(--font-size-scale-up-02);
+  font-weight: var(--font-weight-semi-bold);
+  /* Sem isto o número dança a cada dígito novo: "9%" e "10%" têm larguras
+     diferentes, e o anel inteiro se recentraria. */
+  font-variant-numeric: tabular-nums;
+}
+
+/*
+ * Total ainda desconhecido. O anel gira incompleto, com a mesma abertura do
+ * indicador de tamanho médio do design system, e a velocidade é a mesma —
+ * trocar de marcha no meio do carregamento chamaria mais atenção que o giro.
+ */
+.preload-ring-spin {
+  border: var(--ring-stroke) solid var(--interactive);
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: preload-spin 1.3s linear infinite;
+}
+
+@keyframes preload-spin {
+  to {
+    transform: rotate(359deg);
+  }
 }
 
 .preload-title {
@@ -401,8 +483,15 @@ body {
  * alinhem quando estão lado a lado. O `line-height` é zerado porque o sistema
  * operacional calcula a altura da lista a partir dele, e o `padding` vertical
  * faz o resto do trabalho.
+ *
+ * `display: block` não é cosmético: um `<select>` é `inline-block` por padrão, e
+ * o invólucro `.br-select` que o contém herda a folga de linha de base — uns 4px
+ * abaixo do controle. Ao lado de um campo de texto, esse invólucro fica mais
+ * alto que o campo e o `align-items: end` empurra o campo para cima. Como bloco,
+ * o invólucro tem exatamente a altura do controle.
  */
 .br-select select {
+  display: block;
   width: 100%;
   height: var(--app-control-h);
   margin-top: var(--spacing-scale-half);
@@ -793,24 +882,48 @@ body {
 }
 
 .app-table .col-rule-name {
-  width: 20%;
+  width: 18%;
 }
 .app-table .col-rule-cond {
-  width: 34%;
+  width: 32%;
 }
 .app-table .col-rule-dest {
-  width: 26%;
+  width: 24%;
 }
+
+/*
+ * O resumo da condição é uma frase que pode ser bem longa ("… é igual a “195”
+ * ou “193” ou …"), e a célula é a que mais sofre com isso. Como `span` inline,
+ * `overflow: hidden` não vale — ele só age em contêiner de bloco —, e o texto
+ * vazava por cima da coluna de destinatários. Como bloco, o `span` fica com a
+ * largura da célula e o `text-overflow` corta com reticências, que é o que a
+ * classe quer dizer.
+ */
+.app-table .col-rule-cond > .ellipsis {
+  display: block;
+}
+
 .app-table .col-rule-on {
   width: 8%;
   text-align: center;
 }
+/*
+ * "Editar" e o botão de excluir ficam na mesma linha. Com 12% a célula
+ * apertava o botão circular para a linha seguinte, e a ação de cada regra
+ * virava duas: a coluna agora comporta os dois lado a lado, que é como se lê
+ * uma linha de ações.
+ */
 .app-table .col-rule-actions {
-  width: 12%;
+  width: 18%;
+  white-space: nowrap;
 }
 
 .app-table .col-rule-actions .br-button {
   margin-right: var(--spacing-scale-half);
+}
+
+.app-table .col-rule-actions .br-button:last-child {
+  margin-right: 0;
 }
 
 /* O histórico é uma lista simples: hora, resultado, regra e quantos atos. */
@@ -866,12 +979,18 @@ body {
   color: var(--color-danger);
 }
 
-/* Formulário dos painéis: rótulo visível acima do controle. */
+/*
+ * Formulário dos painéis: rótulo visível acima do controle.
+ *
+ * Sem largura máxima própria: o painel (`min(760px, 64vw)`) já é o limite, e
+ * uma segunda trava menor deixava uma faixa vazia à direita — com um campo de
+ * condição, que tem quatro controles numa linha só, isso custava espaço de
+ * verdade. O respiro das laterais vem do `padding` do corpo do painel.
+ */
 .settings-form {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-scale-2x);
-  max-width: 640px;
 }
 
 .form-field {
@@ -880,63 +999,62 @@ body {
   gap: var(--spacing-scale-half);
 }
 
-/*
- * Campos e botões na mesma linha.
- *
- * O design system não alinha esses controles em linha: cada campo recebe
- * `margin-top: 4px` (`.br-input input`, `.br-select select`), enquanto
- * `.br-button` é um `inline-flex` com `height` — uma altura explícita faz o
- * `align-items: stretch` (o padrão) resolver para `flex-start`, deixando o
- * botão 8px acima do campo. Um `align-items: center` sozinho melhora, mas ainda
- * deixa o campo 2px abaixo, porque o `margin-top` entra no cálculo.
- *
- * Por isso o alinhamento aqui é pelas linhas de base *reais*: a mesma
- * `margin-top` é dada a quem não tem (o botão) e, então, todos os topos
- * coincidem. A altura é fixada em `--app-control-h`, a mesma do `.br-select
- * select`, para que um botão ao lado de um campo não fique mais alto que ele.
- * O `min-width: 0` deixa os campos encolherem em vez de estourar a linha.
- */
-.form-row,
-.password-row,
-.rule-filter {
+/* Dois campos lado a lado, como Porta e Segurança. */
+.form-row {
   display: flex;
   align-items: flex-start;
-  gap: var(--spacing-scale-half);
-}
-
-.form-row > *,
-.password-row > *,
-.rule-filter > * {
-  margin-top: var(--spacing-scale-half);
-  min-width: 0;
-}
-
-.form-row .br-input input,
-.password-row .br-input input,
-.rule-filter .br-input input,
-.form-row .br-select select,
-.rule-filter .br-select select {
-  margin-top: 0;
-}
-
-.password-row .br-button,
-.rule-filter .br-button {
-  height: var(--app-control-h);
-  width: var(--app-control-h);
-  --button-size: var(--app-control-h);
-}
-
-/* Dois campos lado a lado respiram mais que um campo e um botão. */
-.form-row {
   gap: var(--spacing-scale-base);
 }
 
 .form-row .form-field {
   flex: 1;
+  min-width: 0;
+}
+
+/*
+ * Campo com um botão ao lado, como a senha com o olho e o teste de envio.
+ *
+ * Aqui os dois controles são filhos diretos, e o design system não os alinha:
+ * o campo recebe `margin-top: 4px` (`.br-input input`) enquanto o botão, um
+ * `inline-flex` com `height` fixa, começa no topo. O `align-items: flex-start`
+ * ainda expõe isso — uma altura explícita faz o `stretch` (o padrão) virar
+ * `flex-start` de qualquer forma. Então o `margin-top` interno é zerado e dado
+ * a ambos os filhos por igual: os topos passam a coincidir.
+ *
+ * O campo cede espaço ao botão em vez de dividir a linha meio a meio: o campo
+ * é elástico (`flex: 1`) e o botão fica com o que o próprio texto pede, sem
+ * encolher. Assim o rótulo do botão nunca é cortado — é o campo que fica um
+ * pouco menor ao lado de um botão mais largo.
+ */
+.password-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-scale-half);
+}
+
+.password-row > * {
+  margin-top: var(--spacing-scale-half);
+  min-width: 0;
 }
 
 .password-row .br-input {
-  flex: 1;
+  flex: 1 1 0;
+}
+
+.password-row .br-input input {
+  margin-top: 0;
+}
+
+.password-row .br-button {
+  flex: 0 0 auto;
+  height: var(--app-control-h);
+}
+
+/* Só o botão de ícone é quadrado; o de texto mantém o `padding` lateral que o
+   design system dá, senão "Testar envio" não caberia nos 40px. */
+.password-row .br-button.circle {
+  width: var(--app-control-h);
+  --button-size: var(--app-control-h);
 }
 
 .form-actions {
@@ -954,28 +1072,230 @@ body {
 .rule-filters {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: stretch;
   gap: var(--spacing-scale-base);
 }
 
 /*
- * `min-width: 0` em todos os filhos, e não só no `.br-select`: como `.br-select`
- * do design system nasce com `min-width: 210px`, uma condição no drawer ficaria
- * mais larga que o formulário e empurraria o botão de remover para fora da
- * linha. O `flex: 1` do campo de valor divide o que sobra entre coluna e
- * operador.
+ * Uma condição é uma grade, não um flex.
+ *
+ * As opções de `Coluna` são os rótulos longos do `Info.xml`, então a largura
+ * *intrínseca* de um `<select>` nativo é grande — sozinho ele pede uns 350px.
+ * Num flex isso é o `min-content` da faixa, que não encolhe: com três controles
+ * assim a linha passa da largura do painel e os itens se sobrepõem. As colunas
+ * da grade são declaradas em `minmax(0, …)`, o que permite encolher abaixo do
+ * conteúdo, e o `min-width: 0` nos próprios controles solta o piso de 100px do
+ * `.br-select` do design system.
+ *
+ * Os controles em si dividem a largura disponível e crescem até o fim do painel:
+ * a coluna é a maior porque carrega o rótulo longo do `Info.xml`; antes havia
+ * duas travas (frações apertadas e um `max-width` no formulário) que deixavam
+ * uma faixa vazia à direita e obrigavam o texto do seletor a ser cortado.
+ *
+ * O conector é a primeira coluna, estreita e fixa; a `Coluna` fica com uma
+ * fração maior porque nomes como "Número de identificação do ato" não cabem
+ * numa fatia pequena; o botão de remover tem largura fixa, a mesma do campo,
+ * para ficar quadrado.
+ *
+ * O `min-width: 0` do seletor de dentro do conector é o que corrige o
+ * desalinhamento: o `.br-select` do design system declara `min-width: 100px`, e
+ * a regra acima só alcança os filhos diretos da grade — o conector *não* fica
+ * com 40px por isso e transborda para fora da própria célula. Como a grade é de
+ * uma linha só, o transbordo empurrava e cobria o seletor de coluna ao lado.
+ *
+ * O alinhamento é pelos topos, e não por `end`: o `margin-top` interno de
+ * `.br-input input` e `.br-select select` é zerado aqui e dado a cada filho por
+ * igual, de modo que os controles e o botão partem do mesmo ponto. Assim não
+ * importa se um deles fica 1px mais alto que o outro — nada é empurrado para
+ * cima ou para baixo.
  */
+.rule-filter {
+  display: grid;
+  grid-template-columns:
+    var(--app-control-h)
+    minmax(0, 1.6fr)
+    minmax(0, 1fr)
+    minmax(0, 1.2fr)
+    var(--app-control-h);
+  align-items: start;
+  gap: var(--spacing-scale-half);
+}
+
 .rule-filter > * {
+  min-width: 0;
+  margin-top: var(--spacing-scale-half);
+}
+
+/* O piso de 100px do `.br-select` do design system é o que fazia o conector
+   transbordar da coluna de 40px e cobrir o seletor de coluna. `> *` acima não
+   basta: ele zera os filhos diretos da grade, e o conector é um invólucro
+   dentro de um deles. */
+.rule-logic,
+.rule-logic .br-select {
   min-width: 0;
 }
 
-.rule-filter .br-select {
-  flex: 0 1 auto;
+/* A primeira condição não tem conector; o vão vazio mantém a grade alinhada. */
+.rule-logic-spacer {
+  display: block;
+  height: var(--app-control-h);
 }
 
-.rule-filter .br-input {
-  flex: 1;
+.rule-filter .br-input input,
+.rule-filter .br-select select {
+  margin-top: 0;
 }
+
+.rule-filter .br-select select {
+  padding: 0 var(--spacing-scale-base);
+}
+
+.rule-filter .br-button {
+  height: var(--app-control-h);
+  width: var(--app-control-h);
+  --button-size: var(--app-control-h);
+}
+
+/*
+ * O conector é curto demais para o desenho completo de uma lista: a seta nativa
+ * sozinha ocuparia quase toda a largura e "OU" ficaria cortado. Sem ela, o texto
+ * centrado é o próprio rótulo, e o controle continua sendo um `<select>` de
+ * verdade — teclado, leitor de tela e o menu do sistema seguem funcionando.
+ */
+.rule-logic .br-select select {
+  appearance: none;
+  padding: 0;
+  text-align: center;
+}
+
+/* O valor pode ser um campo de texto ou a escolha múltipla; os dois ocupam a
+   célula da grade e não devem esticar além dela. */
+.rule-value {
+  min-width: 0;
+}
+
+/* O "Adicionar condição" acompanha a largura do formulário, não do conteúdo. */
+.rule-filters > .br-button {
+  align-self: flex-start;
+}
+
+/*
+ * Escolha múltipla: um gatilho com a mesma aparência do `<select>` ao lado e um
+ * painel de caixas de seleção abaixo dele.
+ *
+ * O painel é `position: absolute` dentro do próprio componente, que é o
+ * referencial — assim ele abre encostado no gatilho, na direção do campo, em
+ * vez de depender da posição do ponteiro. `z-index` local: o painel precisa
+ * ficar sobre os controles seguintes, mas não sobre o `drawer` (z-index 101),
+ * e um valor alto aqui não vaza para fora dele porque o `aside` é quem cria o
+ * contexto de empilhamento.
+ */
+.multi-select {
+  position: relative;
+}
+
+.multi-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-scale-half);
+  width: 100%;
+  height: var(--app-control-h);
+  padding: 0 var(--spacing-scale-base);
+  background-color: var(--background-light);
+  border: var(--border-width) var(--border-style) var(--border-color-alternative);
+  border-radius: var(--surface-rounder-sm);
+  color: var(--color-light);
+  font-family: inherit;
+  font-size: var(--font-size-scale-up-01);
+  font-weight: var(--font-weight-medium);
+  text-align: left;
+  cursor: pointer;
+}
+
+.multi-trigger:focus-visible {
+  outline: var(--focus-width) var(--focus-style) var(--focus-color);
+  outline-offset: var(--focus-offset);
+}
+
+.multi-trigger:disabled {
+  color: var(--color-secondary-06);
+  background-color: var(--color-secondary-03);
+  cursor: default;
+}
+
+.multi-summary {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/*
+ * O painel acompanha o gatilho, mas não se limita a ele: as opções vêm de
+ * tabelas de domínio e têm nomes longos ("ATA DE AUDIÊNCIA..."), então quando
+ * há espaço ele cresce para a esquerda, ancorado pela borda direita — assim os
+ * rótulos cabem inteiros em vez de virarem reticências, sem que o painel saia
+ * do painel de detalhes pelo lado direito da janela.
+ */
+.multi-panel {
+  position: absolute;
+  z-index: 10;
+  top: calc(100% + var(--spacing-scale-half));
+  right: 0;
+  /* `max-content` puxa a largura dos rótulos (que são `nowrap`); o piso a
+     mantém do tamanho do gatilho e o teto evita que o painel cubra o canto
+     oposto quando a tabela de domínio traz um nome muito longo. */
+  width: max-content;
+  min-width: 100%;
+  max-width: 380px;
+  max-height: 260px;
+  overflow: auto;
+  padding: var(--spacing-scale-half) 0;
+  background: var(--background-light);
+  border: 1px solid var(--border-color);
+  border-radius: var(--surface-rounder-sm);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.16);
+}
+
+.multi-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-scale-half);
+  padding: var(--spacing-scale-half) var(--spacing-scale-base);
+  cursor: pointer;
+}
+
+.multi-item:hover,
+.multi-item:focus-visible {
+  background: var(--color-secondary-02);
+  outline: none;
+}
+
+/* A marca é desenhada, não depende de `accent-color`: o navegador do WebView
+   não é confiável para o `appearance` nativo em todas as plataformas. */
+.multi-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border-color-alternative);
+  border-radius: 2px;
+  color: var(--background-light);
+}
+
+.multi-check.on {
+  background: var(--color-primary-default);
+  border-color: var(--color-primary-default);
+}
+
+.multi-label {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 
 /* O interruptor fica melhor alinhado ao lado do rótulo do que empilhado. */
 .form-field .br-switch {

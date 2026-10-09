@@ -120,9 +120,10 @@ pub struct FieldValue {
     pub related_table: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Op {
+    #[default]
     Eq,
     Ne,
     Like,
@@ -150,11 +151,57 @@ impl Op {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// How a group combines its conditions.
+///
+/// `And` is the default so a condition sent without a logic of its own behaves as
+/// it always has. `Or` exists for the "any of these" rule — a column with a
+/// defined type list is usually filtered that way (Decree *or* Law).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Logic {
+    And,
+    Or,
+}
+
+impl Default for Logic {
+    fn default() -> Self {
+        Logic::And
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Filter {
+    /// Empty means "no column chosen yet" — the UI's "Nova condição" state.
     pub column: String,
+    /// `Eq` by default: the conservative choice, and the one the UI starts from.
     pub op: Op,
+    /// The primary value. Keep it first: the frontend and the stored rule JSON
+    /// are written against this name.
     pub value: String,
+    /// Extra values for "is one of". Each is bound separately, so the value
+    /// never reaches the SQL text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+    /// Router for this condition against the previous one. `And` when omitted.
+    #[serde(default)]
+    pub logic: Logic,
+}
+
+impl Filter {
+    /// Every value this condition should match: `value`, then `values`, with the
+    /// blanks dropped and duplicates removed. `values` is checked first so tests
+    /// (and any caller) can build a multi-value condition without knowing which
+    /// field the reader prefers.
+    fn all_values(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = Vec::new();
+        for v in self.values.iter().chain(std::iter::once(&self.value)) {
+            let t = v.trim();
+            if !t.is_empty() && !out.contains(&t) {
+                out.push(t);
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -178,6 +225,14 @@ pub struct ActQuery {
 pub struct SearchResult {
     pub rows: Vec<ActRow>,
     pub total: i64,
+}
+
+/// One entry of a column's defined type list: the stored `value` and the label
+/// the UI shows for it (a decoded meaning, or the dimension's `NOME`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ColumnValue {
+    pub value: String,
+    pub label: String,
 }
 
 /// A value and its frequency, for the filter dropdowns.
@@ -625,19 +680,80 @@ impl Store {
             binds.push(Box::new(full_text_query(text)));
         }
 
-        for f in &q.filters {
+        // Conditions are grouped by their own logic, and the groups are joined with
+        // AND. AND is associative, so the result is exactly "every group holds" —
+        // no nesting needed, and it matches the flat editor the UI offers.
+        //
+        // Negated conditions are emitted first so that "não é DECRETO" becomes
+        // `NOT (col = ?)` rather than `col != ?`: a column that is null compares
+        // as unknown and would be dropped by `!=`, but `NOT (col = ?)` keeps it.
+        let mut order: Vec<(usize, &Filter)> = q.filters.iter().enumerate().collect();
+        order.sort_by_key(|(i, f)| (f.op != Op::Ne, *i));
+
+        // Each entry is one AND-group: the OR-ed terms it contains.
+        let mut groups: Vec<Vec<String>> = Vec::new();
+
+        for (_, f) in order {
             if !filterable_columns().contains(&f.column.as_str()) {
                 bail!("column {:?} is not filterable", f.column);
             }
-            let esc = matches!(f.op, Op::Like);
-            clauses.push(format!(
-                "a.\"{}\" {} ?{}{}",
-                f.column,
-                f.op.sql(),
-                binds.len() + 1,
-                if esc { " ESCAPE '\\'" } else { "" }
-            ));
-            binds.push(Box::new(f.op.param(&f.value)));
+            let esc = if matches!(f.op, Op::Like) { " ESCAPE '\\'" } else { "" };
+            let values = f.all_values();
+            if values.is_empty() {
+                continue; // a condition with no value constrains nothing
+            }
+
+            // The SQL for this one condition. Each value is bound separately, so
+            // neither the column nor the values reach the SQL text.
+            let term = match f.op {
+                // "is one of", the SQL form of a multi-value equality.
+                Op::Eq => {
+                    let mut any = Vec::new();
+                    for v in &values {
+                        any.push(format!("a.\"{}\" = ?{}", f.column, binds.len() + 1));
+                        binds.push(Box::new(v.to_string()));
+                    }
+                    any.join(" OR ")
+                }
+                // "is none of": keeps rows whose column holds none of the values.
+                Op::Ne => {
+                    let mut any = Vec::new();
+                    for v in &values {
+                        any.push(format!("a.\"{}\" = ?{}", f.column, binds.len() + 1));
+                        binds.push(Box::new(v.to_string()));
+                    }
+                    format!("NOT ({})", any.join(" OR "))
+                }
+                // The ordering operators take a single value.
+                _ => {
+                    let v = values[0];
+                    // `esc` trails the placeholder, as SQL requires.
+                    let sql = format!(
+                        "a.\"{}\" {} ?{}{esc}",
+                        f.column,
+                        f.op.sql(),
+                        binds.len() + 1
+                    );
+                    binds.push(Box::new(f.op.param(v)));
+                    sql
+                }
+            };
+
+            // OR continues the group in progress; AND opens a new one.
+            match (f.logic, groups.last_mut()) {
+                (Logic::Or, Some(last)) => last.push(term),
+                _ => groups.push(vec![term]),
+            }
+        }
+
+        // A one-term group needs no parentheses; a multi-term one does, or its OR
+        // would leak into the ANDs that join the groups.
+        for terms in groups {
+            clauses.push(if terms.len() == 1 {
+                terms[0].clone()
+            } else {
+                format!("({})", terms.join(" OR "))
+            });
         }
 
         // The "newly appended" floor. Bound like any other value; `a."ID"` is the
@@ -767,6 +883,110 @@ impl Store {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// The values a column can take, according to the schema, with a label to show.
+    ///
+    /// Two kinds of "defined type" meet here, and they are kept apart because they
+    /// are different claims:
+    ///
+    /// * A column the schema restricts with `<Values>` has a *closed* list. Every
+    ///   legal value is known up front, so the list is exactly that.
+    /// * A foreign key (`<Related table=… key=…>`) points at a lookup table the
+    ///   feed publishes. Its rows are the vocabulary; the label is the dimension's
+    ///   `NOME`, the value the key the acts store.
+    ///
+    /// `None` means "no defined type" — a free column, where the UI offers a text
+    /// field. A dimension that has not been ingested yet falls back to the values
+    /// actually present in the acts, so the picker is never empty when it can help.
+    pub fn column_values(
+        &self,
+        schema: &Schema,
+        column: &str,
+        limit: i64,
+    ) -> Result<Option<Vec<ColumnValue>>> {
+        if !filterable_columns().contains(&column) {
+            bail!("column {column:?} is not filterable");
+        }
+        let Some(decl) = schema
+            .table("ATO")
+            .and_then(|t| t.columns.iter().find(|c| c.name == column))
+        else {
+            return Ok(None);
+        };
+
+        if !decl.values.is_empty() {
+            let mut out: Vec<ColumnValue> = decl
+                .values
+                .iter()
+                // `description` is the label the dictionary gives the value; when it
+                // is absent (or just repeats the raw value) the value speaks for
+                // itself. `help` is the longer prose, kept as a hint only.
+                .map(|v| ColumnValue {
+                    value: v.value.clone(),
+                    label: if v.description.trim().is_empty() {
+                        v.value.clone()
+                    } else {
+                        v.description.clone()
+                    },
+                })
+                .collect();
+            out.truncate(limit.max(1) as usize);
+            return Ok(Some(out));
+        }
+
+        let Some(rel) = decl.related.as_ref() else {
+            return Ok(None);
+        };
+
+        // The dimension CSV is small and loaded wholesale; `NOME` is its label
+        // column in this feed. A missing table (not ingested yet) is not an error.
+        let exists: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![rel.table],
+            |r| r.get(0),
+        )?;
+        let safe = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if exists && safe(&rel.table) && safe(&rel.key) {
+            let sql = format!(
+                "SELECT \"{key}\", \"NOME\" FROM \"{table}\" WHERE \"{key}\" IS NOT NULL
+                 ORDER BY \"NOME\" LIMIT ?1",
+                key = rel.key,
+                table = rel.table
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt
+                .query_map(params![limit.max(1)], |r| {
+                    let value: String = r.get(0)?;
+                    let nome: Option<String> = r.get(1)?;
+                    Ok(ColumnValue {
+                        label: nome.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| value.clone()),
+                        value,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if !rows.is_empty() {
+                return Ok(Some(rows));
+            }
+        }
+
+        // No dimension loaded: fall back to what the acts themselves hold, which is
+        // the name rather than the key for the columns this feed denormalises. An
+        // empty result is reported as "no list", so the UI offers a text field
+        // rather than a select with nothing in it.
+        let facets = self.facet(column, limit)?;
+        if facets.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(
+            facets
+                .into_iter()
+                .map(|f| ColumnValue {
+                    label: format!("{} ({})", f.value, f.count),
+                    value: f.value,
+                })
+                .collect(),
+        ))
     }
 
     /// Every stored field of one act, labelled from the schema.
@@ -1165,6 +1385,7 @@ mod tests {
                     column: "TIPO_ATO_ID".into(),
                     op: Op::Eq,
                     value: "DECRETO".into(),
+                    ..Default::default()
                 }],
                 limit: 10,
                 ..Default::default()
@@ -1178,6 +1399,7 @@ mod tests {
                     column: "TIPO_ATO_ID".into(),
                     op: Op::Like,
                     value: "LEI".into(),
+                    ..Default::default()
                 }],
                 limit: 10,
                 ..Default::default()
@@ -1196,12 +1418,135 @@ mod tests {
                     column: "ORGAO_ID__ORIGEM".into(),
                     op: Op::Eq,
                     value: "' OR 1=1 --".into(),
+                    ..Default::default()
                 }],
                 limit: 10,
                 ..Default::default()
             })
             .unwrap();
         assert_eq!(r.total, 0, "the value must be bound, not executed");
+    }
+
+    #[test]
+    fn a_filter_accepts_several_values_as_one_of() {
+        let s = seeded();
+        let f = |op, value: &str, values: &[&str]| Filter {
+            column: "TIPO_ATO_ID".into(),
+            op,
+            value: value.into(),
+            values: values.iter().map(|v| v.to_string()).collect(),
+            logic: Logic::And,
+        };
+
+        // "one of": id 1 is a DECRETO, id 2 a LEI COMPLEMENTAR — both match.
+        let r = s
+            .search(&ActQuery {
+                filters: vec![f(Op::Eq, "DECRETO", &["LEI COMPLEMENTAR"])],
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.total, 2);
+
+        // "none of": the same list inverted excludes both.
+        let r = s
+            .search(&ActQuery {
+                filters: vec![f(Op::Ne, "DECRETO", &["LEI COMPLEMENTAR"])],
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.total, 0);
+
+        // A blank entry is not a value, and duplicates collapse.
+        let r = s
+            .search(&ActQuery {
+                filters: vec![f(Op::Eq, "DECRETO", &["", "DECRETO"])],
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.total, 1);
+    }
+
+    #[test]
+    fn conditions_join_with_and_and_or() {
+        let s = seeded();
+        let cond = |column: &str, value: &str, logic: Logic| Filter {
+            column: column.into(),
+            op: Op::Eq,
+            value: value.into(),
+            values: Vec::new(),
+            logic,
+        };
+
+        // AND: DECRETO and the Prefeitura órgão — only id 1 has both.
+        let r = s
+            .search(&ActQuery {
+                filters: vec![
+                    cond("TIPO_ATO_ID", "DECRETO", Logic::And),
+                    cond("ORGAO_ID__ORIGEM", "PREFEITURA MUNICIPAL DE CURITIBA", Logic::And),
+                ],
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.total, 1);
+        assert_eq!(r.rows[0].id, 1);
+
+        // OR between two conditions: either tipo matches, so both rows come back.
+        let r = s
+            .search(&ActQuery {
+                filters: vec![
+                    cond("TIPO_ATO_ID", "DECRETO", Logic::And),
+                    cond("TIPO_ATO_ID", "LEI COMPLEMENTAR", Logic::Or),
+                ],
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.total, 2);
+
+        // The group is parenthesised, so an OR does not leak past a following AND:
+        // (DECRETO OR LEI) AND SITUACAO=Em Vigor keeps only id 2.
+        let r = s
+            .search(&ActQuery {
+                filters: vec![
+                    cond("TIPO_ATO_ID", "DECRETO", Logic::And),
+                    cond("TIPO_ATO_ID", "LEI COMPLEMENTAR", Logic::Or),
+                    cond("SITUACAO_ACAO_ID", "Em Vigor", Logic::And),
+                ],
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.total, 1);
+        assert_eq!(r.rows[0].id, 2);
+    }
+
+    #[test]
+    fn a_negated_filter_keeps_rows_whose_column_is_empty() {
+        let mut s = seeded();
+        // A third act with no tipo at all. `!= 'DECRETO'` would drop it (null
+        // compares as unknown), `NOT (col = 'DECRETO')` keeps it — which is what
+        // "não é decreto" means to a reader.
+        s.insert_rows(&[row(3, &[("NUMERO_IDENTIFICACAO", "DOC-3"), ("TIPO_ATO_ID", "")])])
+            .unwrap();
+        let r = s
+            .search(&ActQuery {
+                filters: vec![Filter {
+                    column: "TIPO_ATO_ID".into(),
+                    op: Op::Ne,
+                    value: "DECRETO".into(),
+                    values: Vec::new(),
+                    logic: Logic::And,
+                }],
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.total, 2, "the LEI and the blank row both stand");
+        assert!(r.rows.iter().all(|r| r.id != 1));
     }
 
     #[test]
@@ -1213,6 +1558,7 @@ mod tests {
                 column: "NUMERO_IDENTIFICACAO".into(),
                 op: Op::Like,
                 value: "DOC".into(),
+                ..Default::default()
             }],
             min_id,
             limit: 10,
@@ -1260,7 +1606,8 @@ mod tests {
                 filters: vec![Filter {
                     column: "body".into(),
                     op: Op::Eq,
-                    value: "x".into()
+                    value: "x".into(),
+                    ..Default::default()
                 }],
                 limit: 1,
                 ..Default::default()
