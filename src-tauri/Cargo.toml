@@ -1,0 +1,44 @@
+[package]
+name = "legisladoc-browser"
+version = "0.1.0"
+description = "Browse and search the Legisladoc rsync feed with a local index"
+authors = ["Erick"]
+edition = "2021"
+
+[lib]
+# The `_lib` suffix keeps the lib name distinct from the bin name on Windows.
+# See https://github.com/rust-lang/cargo/issues/8519
+name = "legisladoc_browser_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-log = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `bundled` compiles SQLite from source: no system sqlite3.dll to chase on Windows.
+# FTS5 lives in the main SQLite amalgamation and is enabled by default in this build.
+rusqlite = { version = "0.40", features = ["bundled"] }
+# HTTP with byte-range support. The feed's Apache mirror advertises
+# `Accept-Ranges: bytes`, which is what makes byte-offset delta sync possible.
+ureq = "3"
+# Runtime schema comes from the feed's own `*_Info.xml`.
+roxmltree = "0.21"
+encoding_rs = "0.8"
+# Vendored: upstream 0.2.1 panics on Windows for *every* url (see vendor/arrsync/src/client.rs),
+# so we carry the one-line fix rather than patching a registry copy.
+arrsync = { path = "vendor/arrsync" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+url = "2"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+log = "0.4"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+strip = true

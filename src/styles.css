@@ -1,0 +1,770 @@
+/*
+ * Aparência da aplicação, sobre o GOVBR-DS (Padrão Digital de Governo).
+ *
+ * As cores, a tipografia e os espaçamentos vêm dos tokens do design system
+ * (`@govbr-ds/core`), importados em `main.tsx` antes deste arquivo. Aqui ficam
+ * apenas o layout da aplicação e os poucos ajustes que o design system não
+ * cobre — em especial a rolagem interna, que é própria de uma janela de
+ * aplicativo e não de uma página.
+ *
+ * Paleta aplicada (tokens do GOVBR-DS):
+ *   primária  #1351b4  --color-primary-default
+ *   texto     #333     --color-light        fundo  #fff  --background-light
+ *   apoio     #f8f8f8  --color-secondary-02 borda  #ccc  --color-secondary-04
+ */
+
+:root {
+  /* Tokens que o GOVBR-DS não define e que o layout da aplicação precisa. */
+  --app-radius: var(--surface-rounder-sm);
+  --app-row-h: 40px;
+  /*
+   * Altura dos controles de formulário. O design system tem esse valor em
+   * `--input-medium` e `--button-medium` (ambos 40px), mas os declara dentro de
+   * `.br-input` e `.br-button`: fora desses componentes o token não existe, e a
+   * lista suspensa ficava com a altura do próprio elemento nativo (~23px),
+   * menor que o campo de texto ao lado.
+   */
+  --app-control-h: 40px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--background);
+  color: var(--color);
+  font-family: var(--font-family-base);
+  font-size: var(--font-size-scale-base);
+  -webkit-font-smoothing: antialiased;
+  /* A janela do aplicativo não rola: só as listas internas. */
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ---------- cabeçalho ---------- */
+
+.br-header {
+  flex-shrink: 0;
+}
+
+/*
+ * O design system já dá `justify-content: space-between` a `.header-bottom`,
+ * mas ele espera uma lista de navegação que ocupa a linha inteira. Aqui só as
+ * abas e os controles convivem nela: as abas à esquerda, os controles à
+ * direita, alinhados pela base para que o botão e a lista fiquem na mesma
+ * linha ótica.
+ */
+.br-header .header-bottom {
+  align-items: flex-end;
+  gap: var(--spacing-scale-3x);
+}
+
+.br-header .header-bottom .hero-controls {
+  flex-shrink: 0;
+  padding-bottom: var(--spacing-scale-half);
+}
+
+/* O cabeçalho do design system é de página, não de aplicativo: ocupa a altura
+   que precisar, sem esticar. */
+.br-header .header-logo {
+  align-items: center;
+}
+
+.app-title {
+  font-size: var(--font-size-scale-up-02);
+  font-weight: var(--font-weight-semi-bold);
+  color: var(--color);
+}
+
+.app-subtitle {
+  color: var(--color-secondary-07);
+  font-size: var(--font-size-scale-down-01);
+}
+
+/*
+ * Resumo do acervo. São poucas medidas independentes, então vêm como números
+ * lado a lado — não como gráfico: uma barra só acrescentaria tinta a um dado
+ * que já se lê direto. A faixa é compacta de propósito, para que a tabela,
+ * que é o conteúdo, fique com o resto da altura da janela.
+ */
+.hero {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-scale-base);
+  flex-shrink: 0;
+  padding: var(--spacing-scale-2x) var(--spacing-scale-3x)
+    var(--spacing-scale-base);
+}
+
+.hero-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-scale-base);
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-scale-half);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--surface-rounder-pill);
+  background: var(--color-secondary-05);
+  flex-shrink: 0;
+}
+
+.status-ok .status-dot {
+  background: var(--success);
+}
+.status-busy .status-dot {
+  background: var(--warning);
+}
+.status-bad .status-dot {
+  background: var(--danger);
+}
+
+.status-text {
+  color: var(--color-secondary-07);
+  font-size: var(--font-size-scale-down-01);
+}
+
+/* O status pode carregar uma mensagem de erro inteira: precisa poder ser cortada. */
+.status-text {
+  max-width: 60ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-bad .status-text {
+  color: var(--danger);
+}
+
+/* A fonte do feed é uma URL longa e sem espaços. */
+.source {
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-secondary-06);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: var(--font-size-scale-down-01);
+}
+
+.delta-good {
+  color: var(--success);
+  font-weight: var(--font-weight-semi-bold);
+}
+
+/* ---------- abas ---------- */
+
+.tabs {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0 var(--spacing-scale-3x);
+}
+
+.tabs-hint {
+  margin-left: auto;
+  padding-right: var(--spacing-scale-2x);
+  color: var(--color-secondary-06);
+  font-size: var(--font-size-scale-down-01);
+}
+
+/* ---------- avisos ---------- */
+
+.app-message {
+  margin: 0 var(--spacing-scale-3x) var(--spacing-scale-2x);
+}
+
+/* ---------- tiles ---------- */
+
+.tiles {
+  display: grid;
+  /* Quatro medidas: uma linha só enquanto couberem, quebrando quando a janela
+     for estreita demais. */
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--spacing-scale-base);
+}
+
+.tile {
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius);
+  background: var(--background-light);
+  padding: var(--spacing-scale-base) var(--spacing-scale-2x);
+}
+
+.tile-label {
+  color: var(--color-secondary-07);
+  font-size: var(--font-size-scale-down-01);
+  font-weight: var(--font-weight-medium);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tile-value {
+  margin-top: 2px;
+  font-size: var(--font-size-scale-up-03);
+  font-weight: var(--font-weight-semi-bold);
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.tile-note {
+  margin-top: 2px;
+  color: var(--color-secondary-06);
+  font-size: var(--font-size-scale-down-01);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- preparação do acervo ---------- */
+
+/*
+ * A primeira carga ocupa a área do conteúdo, no lugar da tabela. Não é um
+ * aviso sobre a página: é a página, enquanto não há acervo para mostrar.
+ */
+.preload {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--spacing-scale-4x) var(--spacing-scale-3x);
+}
+
+.preload-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--spacing-scale-base);
+  width: min(520px, 100%);
+  text-align: center;
+}
+
+/* O anel com `data-progress` precisa ser filho posicionado do próprio anel. */
+.preload-ring {
+  position: relative;
+  flex-shrink: 0;
+  margin-bottom: var(--spacing-scale-base);
+}
+
+.preload-title {
+  margin: 0;
+  font-size: var(--font-size-scale-up-02);
+  font-weight: var(--font-weight-semi-bold);
+  color: var(--color);
+}
+
+.preload-note {
+  margin: 0;
+  color: var(--color-secondary-07);
+  font-size: var(--font-size-scale-down-01);
+  line-height: 1.5;
+}
+
+/*
+ * Barra de progresso fina, feita com os tokens do design system: esta versão
+ * não publica um componente de barra, e a espera de 1,4 GB merece uma medida
+ * contínua, não só o anel.
+ */
+.preload-track {
+  width: 100%;
+  height: 6px;
+  margin-top: var(--spacing-scale-2x);
+  overflow: hidden;
+  border-radius: var(--surface-rounder-pill);
+  background: var(--color-secondary-03);
+}
+
+.preload-bar {
+  height: 100%;
+  border-radius: var(--surface-rounder-pill);
+  background: var(--interactive);
+  transition: width 0.3s ease;
+}
+
+/* Enquanto o total é desconhecido a barra pulsa, no lugar de mentir um valor. */
+.preload-bar.indeterminate {
+  animation: preload-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes preload-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+.preload-detail {
+  margin: 0;
+  color: var(--color-secondary-06);
+  font-size: var(--font-size-scale-down-01);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- barra de ferramentas ---------- */
+
+.view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-scale-base);
+  flex-shrink: 0;
+  padding: 0 var(--spacing-scale-3x) var(--spacing-scale-base);
+}
+
+/*
+ * A busca ocupa a linha inteira. O `flex` fica no invólucro para que o campo e
+ * a contagem de atos somem a largura da janela, em vez de ficarem espremidos à
+ * esquerda com sobra à direita.
+ */
+.toolbar > div:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.toolbar .br-input {
+  width: 100%;
+}
+
+.count {
+  color: var(--color-secondary-07);
+  font-size: var(--font-size-scale-down-01);
+  font-variant-numeric: tabular-nums;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--spacing-scale-base);
+  flex-shrink: 0;
+  padding: 0 var(--spacing-scale-3x) var(--spacing-scale-2x);
+}
+
+/* Os rótulos vêm do `help` do Info.xml e são longos: uma linha só, cortada. */
+.facet {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-scale-half);
+  max-width: 260px;
+}
+
+.facet .br-select {
+  min-width: 210px;
+}
+
+/*
+ * O `br-select` do design system é uma lista própria, montada com `.br-list` e
+ * `.br-item`, e o `.br-input` dentro dele é só o campo de busca. Aqui os
+ * conjuntos de valores são pequenos e já vêm contados do banco, então o
+ * elemento nativo é usado com a mesma aparência do campo de texto — sem isso
+ * ele ficaria com o desenho padrão do sistema operacional, destoando dos
+ * demais campos.
+ */
+/*
+ * A mesma altura do campo de texto (`--app-control-h`), para que os dois se
+ * alinhem quando estão lado a lado. O `line-height` é zerado porque o sistema
+ * operacional calcula a altura da lista a partir dele, e o `padding` vertical
+ * faz o resto do trabalho.
+ */
+.br-select select {
+  width: 100%;
+  height: var(--app-control-h);
+  margin-top: var(--spacing-scale-half);
+  padding: 0 var(--spacing-scale-2x);
+  background-color: var(--background-light);
+  border: var(--border-width) var(--border-style) var(--border-color-alternative);
+  border-radius: var(--surface-rounder-sm);
+  color: var(--color-light);
+  font-family: inherit;
+  font-size: var(--font-size-scale-up-01);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+.br-select select:focus-visible {
+  outline: var(--focus-width) var(--focus-style) var(--focus-color);
+  outline-offset: var(--focus-offset);
+}
+
+.br-select select:disabled {
+  color: var(--color-secondary-06);
+  background-color: var(--color-secondary-03);
+  cursor: default;
+}
+
+/* ---------- tabela ---------- */
+
+.table-wrap {
+  flex: 1;
+  overflow: auto;
+  margin: 0 var(--spacing-scale-3x) var(--spacing-scale-2x);
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius);
+}
+
+.app-table {
+  width: 100%;
+  border-collapse: collapse;
+  /* Largura fixa para que as colunas de data e número mantenham o tamanho e os
+     textos longos sejam cortados em vez de empurrar as outras colunas. */
+  table-layout: fixed;
+}
+
+.app-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--color-secondary-02);
+  border-bottom: 1px solid var(--border-color);
+  padding: 0;
+  font-size: var(--font-size-scale-down-01);
+  font-weight: var(--font-weight-semi-bold);
+  color: var(--color-secondary-07);
+  white-space: nowrap;
+}
+
+.sort-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-scale-half);
+  width: 100%;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  padding: var(--spacing-scale-baseh) var(--spacing-scale-2x);
+  cursor: pointer;
+}
+
+.sort-btn:disabled {
+  cursor: default;
+}
+
+.sort-btn:hover:not(:disabled) {
+  color: var(--interactive);
+  background: var(--hover-effect);
+}
+
+.sort-btn:focus-visible {
+  outline: var(--focus-width) var(--focus-style) var(--focus-color);
+  outline-offset: calc(-1 * var(--focus-width));
+}
+
+.head-num .sort-btn {
+  justify-content: flex-end;
+}
+
+.sort-mark {
+  color: var(--interactive);
+  font-size: var(--font-size-scale-down-02);
+}
+
+.app-table tbody td {
+  height: var(--app-row-h);
+  padding: 0 var(--spacing-scale-2x);
+  border-bottom: 1px solid var(--color-secondary-03);
+  vertical-align: middle;
+}
+
+.app-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.app-table tbody tr {
+  cursor: pointer;
+}
+
+.app-table tbody tr:hover {
+  background: var(--color-secondary-02);
+}
+
+.app-table tbody tr.selected {
+  background: var(--blue-warm-vivid-5);
+  box-shadow: inset 3px 0 0 var(--interactive);
+}
+
+.app-table tbody tr:focus-visible {
+  outline: var(--focus-width) var(--focus-style) var(--focus-color);
+  outline-offset: calc(-1 * var(--focus-width));
+}
+
+.ident-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-scale-half);
+  min-width: 0;
+}
+
+.ident {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: var(--font-size-scale-down-01);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cell-tipo,
+.cell-orgao,
+.cell-sumula {
+  color: var(--color-secondary-08);
+}
+
+.sumula {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Destaque do trecho encontrado, devolvido pelo `snippet()` do FTS5. */
+.sumula mark {
+  background: var(--yellow-vivid-10);
+  color: var(--gray-90);
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
+/*
+ * Larguras em porcentagem, não em pixels.
+ *
+ * Com `table-layout: fixed` e larguras fixas, a soma dos pixels podia passar da
+ * largura da janela: a coluna sem largura (Ementa) então ficava com zero e só
+ * se chegava a ela rolando de lado. Em porcentagem a soma é sempre 100% da
+ * tabela — ela nunca transborda, e a Ementa, que é o texto que se lê, cresce
+ * junto com a janela.
+ */
+.col-ident {
+  width: 15%;
+}
+.col-oficial {
+  width: 7%;
+}
+.col-data {
+  width: 10%;
+}
+.col-ano {
+  width: 6%;
+}
+.col-tipo {
+  width: 13%;
+}
+.col-orgao {
+  width: 16%;
+}
+.col-sumula {
+  width: 33%;
+}
+
+/* A listagem de arquivos: o caminho é o que interessa e fica com o resto. */
+.col-file {
+  width: auto;
+}
+.col-size {
+  width: 110px;
+}
+.col-updated {
+  width: 168px;
+}
+
+.empty-row td {
+  height: 140px;
+  text-align: center;
+  color: var(--color-secondary-07);
+  cursor: default;
+}
+
+/* ---------- rodapé ---------- */
+
+.foot {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-scale-base);
+  flex-shrink: 0;
+  padding: var(--spacing-scale-base) var(--spacing-scale-3x)
+    var(--spacing-scale-2x);
+  border-top: 1px solid var(--border-color);
+  color: var(--color-secondary-07);
+  font-size: var(--font-size-scale-down-01);
+}
+
+.foot .spacer {
+  flex: 1;
+}
+
+.foot .br-pagination {
+  padding: 0;
+}
+
+/* ---------- painel de detalhes ---------- */
+
+.drawer-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--surface-overlay-scrim);
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 101;
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 64vw);
+  background: var(--background);
+  border-left: 1px solid var(--border-color);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.14);
+}
+
+.drawer-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--spacing-scale-2x);
+  flex-shrink: 0;
+  padding: var(--spacing-scale-2x) var(--spacing-scale-3x);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.drawer-title {
+  font-size: var(--font-size-scale-up-02);
+  font-weight: var(--font-weight-semi-bold);
+}
+
+.drawer-sub {
+  color: var(--color-secondary-07);
+  font-size: var(--font-size-scale-down-01);
+}
+
+.drawer-body {
+  flex: 1;
+  overflow: auto;
+  padding: var(--spacing-scale-3x);
+}
+
+.fields {
+  display: grid;
+  grid-template-columns: minmax(150px, 220px) 1fr;
+  gap: var(--spacing-scale-base) var(--spacing-scale-2x);
+  margin: 0;
+}
+
+.field {
+  display: contents;
+}
+
+.field dt {
+  color: var(--color-secondary-07);
+  font-size: var(--font-size-scale-down-01);
+  padding-top: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.field dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A tradução do código pela tabela de domínio fica abaixo do valor bruto,
+   mais discreta: é uma leitura do valor, não um segundo valor. */
+.resolved {
+  display: block;
+  color: var(--color-secondary-07);
+  font-size: var(--font-size-scale-down-01);
+}
+
+.body-section {
+  margin-top: var(--spacing-scale-4x);
+}
+
+.body-section h3 {
+  margin: 0 0 var(--spacing-scale-base);
+  font-size: var(--font-size-scale-down-01);
+  font-weight: var(--font-weight-semi-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-secondary-07);
+}
+
+/* O texto do ato é HTML vindo do feed: fica num quadro isolado, para que o
+   estilo dele (e qualquer coisa hostil nele) não alcance a aplicação. */
+.act-body {
+  width: 100%;
+  height: 460px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--app-radius);
+  background: var(--background-light);
+}
+
+/* Um cabeçalho é curto. A altura exata vem do componente, estimada a partir
+   do número de blocos; este é só o ponto de partida. */
+.act-body.short {
+  height: 120px;
+}
+
+/* O carregador do design system é um elemento de bloco; aqui ele aparece
+   dentro de linhas de texto. */
+.br-loading.inline {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* Visível apenas para leitores de tela: presente na marcação e no grafo de
+   acessibilidade, fora do desenho. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
