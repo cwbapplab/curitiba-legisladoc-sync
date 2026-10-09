@@ -36,6 +36,20 @@ url = "2"
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 log = "0.4"
+# SMTP for the notification emails. `default-features = false` is mandatory: the
+# defaults pull `native-tls` (OpenSSL/SChannel), which this app has no system copy
+# of. `rustls-tls` reuses the rustls + ring + webpki-roots already compiled in via
+# ureq, so no second TLS stack is introduced.
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "hostname",
+    "rustls-tls",
+] }
+# AES-256-GCM for the stored SMTP password. Pinned to 0.10: its `aead` 0.5 API
+# (`generate_key`/`generate_nonce` over `OsRng`) is stable, and its default
+# `getrandom` feature supplies the key/nonce generation, so no RNG crate is needed.
+aes-gcm = "0.10"
 
 [profile.release]
 codegen-units = 1

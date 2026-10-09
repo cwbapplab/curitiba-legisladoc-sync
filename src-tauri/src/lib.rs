@@ -14,6 +14,7 @@
 //! transaction that must not be interleaved with it.
 
 mod db;
+mod email;
 mod feed;
 mod ingest;
 mod parser;
@@ -45,6 +46,9 @@ pub struct AppState {
     /// rsync url currently being browsed; the UI can point at another feed.
     source: Mutex<String>,
     syncing: AtomicBool,
+    /// Guards against two notification runs overlapping (a scheduled sync and a
+    /// manual "rodar agora").
+    emailing: AtomicBool,
     interval_minutes: AtomicU64,
     last_error: Mutex<Option<String>>,
     last_report: Mutex<Option<SyncReport>>,
@@ -138,6 +142,20 @@ async fn do_sync(app: &AppHandle) -> anyhow::Result<SyncReport> {
         total: report.total_rows,
     };
     let _ = app.emit("sync-complete", &payload);
+
+    // Notify on new acts, off the async runtime and fire-and-forget: a slow or
+    // dead SMTP server must never delay the sync result. Only a successful sync
+    // is considered, and the email step itself decides whether the action
+    // warrants sending (see `email::notify_after_sync`).
+    if err.is_none() {
+        let handle = app.clone();
+        let action = report.action.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(e) = email::notify_after_sync(&handle, &action) {
+                log::warn!("email notification run failed: {e:#}");
+            }
+        });
+    }
 
     match err {
         Some(e) => anyhow::bail!(e),
@@ -337,6 +355,139 @@ fn search_files(
     Ok(SearchPage { rows, total })
 }
 
+// --------------------------------------------------------- email automático
+
+use email::{EmailLogEntry, EmailRule, EmailRuleInput, EmailSettingsInput, EmailSettingsView, EmailStatus};
+
+/// Current SMTP configuration, without the password.
+#[tauri::command]
+async fn get_email_settings(app: AppHandle) -> Result<EmailSettingsView, String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        email::load_settings(store.conn(), &app)
+            .map(|s| s.view())
+            .map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn save_email_settings(
+    app: AppHandle,
+    settings: EmailSettingsInput,
+) -> Result<EmailSettingsView, String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        email::save_settings(store.conn(), &app, &settings).map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+/// Prove TLS + authentication without waiting for a sync.
+#[tauri::command]
+async fn test_email_connection(app: AppHandle) -> Result<(), String> {
+    blocking(move || {
+        let settings = {
+            let state = app.state::<AppState>();
+            let store = state.store.lock().unwrap();
+            email::load_settings(store.conn(), &app).map_err(|e| format!("{e:#}"))?
+        };
+        email::test_connection(&settings, None).map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn send_test_email(app: AppHandle, to: String) -> Result<(), String> {
+    blocking(move || {
+        let settings = {
+            let state = app.state::<AppState>();
+            let store = state.store.lock().unwrap();
+            email::load_settings(store.conn(), &app).map_err(|e| format!("{e:#}"))?
+        };
+        email::test_connection(&settings, Some(&to)).map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn list_email_rules(app: AppHandle) -> Result<Vec<EmailRule>, String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        email::list_rules(store.conn()).map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn save_email_rule(app: AppHandle, rule: EmailRuleInput) -> Result<EmailRule, String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        email::save_rule(store.conn(), &rule).map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_email_rule(app: AppHandle, id: i64) -> Result<(), String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        email::delete_rule(store.conn(), id).map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn get_email_status(app: AppHandle) -> Result<EmailStatus, String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        email::status(store.conn()).map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+#[tauri::command]
+async fn list_email_log(app: AppHandle, limit: Option<i64>) -> Result<Vec<EmailLogEntry>, String> {
+    blocking(move || {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        email::list_log(store.conn(), limit.unwrap_or(50)).map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
+/// Manual run. `send = false` is a dry run. `since_watermark = false` matches the
+/// whole store, so it can be exercised without waiting for a feed append — and,
+/// deliberately, it never advances the automatic watermark.
+#[tauri::command]
+async fn run_email_rules_now(
+    app: AppHandle,
+    send: bool,
+    since_watermark: bool,
+) -> Result<Vec<EmailLogEntry>, String> {
+    blocking(move || {
+        let floor = if since_watermark {
+            let state = app.state::<AppState>();
+            let store = state.store.lock().unwrap();
+            let count = email::act_count_or_zero(store.conn()).map_err(|e| format!("{e:#}"))?;
+            let max = store.max_act_id().map_err(|e| format!("{e:#}"))?;
+            email::effective_floor(store.conn(), count, max).map_err(|e| format!("{e:#}"))?
+        } else {
+            0
+        };
+        let log = email::run(&app, floor, send).map_err(|e| format!("{e:#}"))?;
+        let _ = app.emit("email-notified", &log);
+        Ok(log)
+    })
+    .await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -354,6 +505,7 @@ pub fn run() {
                 db: Mutex::new(db::open(&file)?),
                 source: Mutex::new(feed::default_url()),
                 syncing: AtomicBool::new(false),
+                emailing: AtomicBool::new(false),
                 interval_minutes: AtomicU64::new(DEFAULT_INTERVAL_MINUTES),
                 last_error: Mutex::new(None),
                 last_report: Mutex::new(None),
@@ -390,7 +542,17 @@ pub fn run() {
             act_detail,
             act_facets,
             query_capabilities,
-            search_files
+            search_files,
+            get_email_settings,
+            save_email_settings,
+            test_email_connection,
+            send_test_email,
+            list_email_rules,
+            save_email_rule,
+            delete_email_rule,
+            get_email_status,
+            list_email_log,
+            run_email_rules_now
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

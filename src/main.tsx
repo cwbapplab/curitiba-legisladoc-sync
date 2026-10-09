@@ -19,6 +19,7 @@ import "@govbr-ds/core/dist/components/card/card.css";
 import "@govbr-ds/core/dist/components/pagination/pagination.css";
 import "@govbr-ds/core/dist/components/scrim/scrim.css";
 import "@govbr-ds/core/dist/components/modal/modal.css";
+import "@govbr-ds/core/dist/components/switch/switch.css";
 
 import App from "./App";
 import "./styles.css";

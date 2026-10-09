@@ -219,14 +219,19 @@ export function Input({
   label,
   type = "text",
   icon,
+  autoComplete,
+  disabled,
 }: {
   id: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   label: string;
-  type?: "text" | "search";
+  type?: "text" | "search" | "password" | "email";
   icon?: IconName;
+  /** Overrides the default `off` — e.g. `new-password` on a stored credential. */
+  autoComplete?: string;
+  disabled?: boolean;
 }) {
   return (
     <div className={icon ? "br-input has-icon" : "br-input"}>
@@ -240,13 +245,48 @@ export function Input({
       )}
       <input
         id={id}
-        type={type === "search" ? "search" : "text"}
+        type={type}
         value={value}
         placeholder={placeholder}
         spellCheck={false}
-        autoComplete="off"
+        autoComplete={autoComplete ?? "off"}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
       />
+    </div>
+  );
+}
+
+/**
+ * `br-switch` — interruptor de liga/desliga.
+ *
+ * O design system o desenha como um `<input type="checkbox" role="switch">`
+ * seguido do rótulo, ambos dentro de `.br-switch`; o estado vem do `checked`.
+ */
+export function Toggle({
+  id,
+  checked,
+  onChange,
+  label,
+  disabled,
+}: {
+  id: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+  disabled?: boolean;
+}) {
+  return (
+    <div className={disabled ? "br-switch disabled" : "br-switch"}>
+      <input
+        id={id}
+        type="checkbox"
+        role="switch"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <label htmlFor={id}>{label}</label>
     </div>
   );
 }
@@ -326,7 +366,13 @@ export type IconName =
   | "chevron-left"
   | "chevron-right"
   | "refresh"
-  | "file";
+  | "file"
+  | "cog"
+  | "eye"
+  | "eye-off"
+  | "plus"
+  | "trash"
+  | "mail";
 
 /**
  * Ícones em SVG inline.
@@ -381,6 +427,47 @@ export function Icon({ name }: { name: IconName }) {
       <>
         <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
         <path d="M14 3v5h5" />
+      </>
+    ),
+    // Engrenagem: ajustes de SMTP.
+    cog: (
+      <>
+        <circle cx="12" cy="12" r="3" />
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+      </>
+    ),
+    eye: (
+      <>
+        <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+        <circle cx="12" cy="12" r="3" />
+      </>
+    ),
+    "eye-off": (
+      <>
+        <path d="M17.94 17.94A10 10 0 0 1 12 20c-6.5 0-10-7-10-7a17 17 0 0 1 5-5.5" />
+        <path d="M9.9 4.24A9 9 0 0 1 12 4c6.5 0 10 7 10 7a17 17 0 0 1-2.16 3.19" />
+        <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+        <line x1="2" y1="2" x2="22" y2="22" />
+      </>
+    ),
+    plus: (
+      <>
+        <line x1="12" y1="5" x2="12" y2="19" />
+        <line x1="5" y1="12" x2="19" y2="12" />
+      </>
+    ),
+    trash: (
+      <>
+        <path d="M4 7h16" />
+        <path d="M10 11v6M14 11v6" />
+        <path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" />
+        <path d="M9 7V4h6v3" />
+      </>
+    ),
+    mail: (
+      <>
+        <rect x="3" y="5" width="18" height="14" rx="2" />
+        <path d="M3 7l9 6 9-6" />
       </>
     ),
   };

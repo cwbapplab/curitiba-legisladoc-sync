@@ -34,9 +34,23 @@ pub enum Plan {
     Full { reason: String },
 }
 
-/// The record terminator, repeated here so the delta check can look for it
-/// without reaching into the parser's internals.
-const TERM: &[u8] = b"\x00\r\n";
+/// The bytes that can end a record: the documented `NUL CR LF`, or the bare
+/// `CR LF` that about 49,700 records in the feed actually use.
+///
+/// The delta handshake looks for these directly rather than going through
+/// [`parser::split_records`], because it deals in byte offsets, not records.
+const TERM_NUL: &[u8] = b"\x00\r\n";
+const TERM_BARE: &[u8] = b"\r\n";
+
+/// Does this record end on a boundary the splitter recognises?
+///
+/// A bare `CR LF` also needs the next record's first line to follow, which the
+/// caller cannot see from the boundary alone — so this test is deliberately
+/// permissive. Being permissive is safe here: the prefix check only decides
+/// whether a delta may be trusted, and the ingest validates every new id.
+pub fn ends_on_boundary(bytes: &[u8]) -> bool {
+    bytes.ends_with(TERM_NUL) || bytes.ends_with(TERM_BARE)
+}
 
 /// Choose between a tail fetch and a full re-ingest.
 ///
@@ -107,6 +121,12 @@ pub struct ScanStats {
 /// Streaming keeps memory bounded regardless of snapshot size: only a chunk plus
 /// one in-flight record is ever held. `on_record` receives the record without
 /// its terminator, which is what [`parser::parse_record`] expects.
+///
+/// Boundary detection is delegated to [`parser::split_records`] rather than
+/// reimplemented here. It used to look for `NUL CR LF` alone, which is a
+/// narrower rule than the feed follows and silently dropped every act that ends
+/// with a bare `CR LF` — 49,716 of them. Two copies of a rule that subtle is how
+/// they drift apart.
 pub fn scan<R: Read>(
     mut reader: R,
     mut on_record: impl FnMut(&[u8]) -> Result<()>,
@@ -124,34 +144,19 @@ pub fn scan<R: Read>(
         stats.bytes += n as u64;
         buf.extend_from_slice(&chunk[..n]);
 
-        // Emit every complete record currently buffered.
-        let mut start = 0usize;
-        while let Some(p) = find_term(&buf, start) {
-            let record = &buf[start..p];
+        let (records, rest) = parser::split_records(&buf);
+        let consumed = buf.len() - rest.len();
+        for record in records {
             if !record.is_empty() {
                 on_record(record)?;
                 stats.records += 1;
             }
-            start = p + TERM.len();
         }
-        if start > 0 {
-            buf.drain(..start);
-        }
+        buf.drain(..consumed);
     }
 
     stats.leftover = buf.len();
     Ok(stats)
-}
-
-/// Find the record terminator at or after `from`.
-fn find_term(hay: &[u8], from: usize) -> Option<usize> {
-    if from >= hay.len() {
-        return None;
-    }
-    hay[from..]
-        .windows(TERM.len())
-        .position(|w| w == TERM)
-        .map(|p| p + from)
 }
 
 /// Scan a delta tail, discarding the leading partial record.

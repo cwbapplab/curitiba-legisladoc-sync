@@ -59,6 +59,8 @@ export interface Filter {
 export interface ActQuery {
   text?: string | null;
   filters: Filter[];
+  /** Only acts with a greater id — used to look at what a sync just appended. */
+  min_id?: number | null;
   sort?: string | null;
   ascending: boolean;
   limit: number;
@@ -134,6 +136,69 @@ export interface SearchPage {
 
 export type SortBy = "mtime" | "size" | "path" | "added";
 
+/* ------------------------------------------------------ email automático --- */
+
+/** SMTP configuration. The password is never returned — only whether one exists. */
+export interface EmailSettings {
+  provider: "google" | "custom";
+  host: string;
+  port: number;
+  security: "starttls" | "tls" | "none";
+  username: string;
+  has_password: boolean;
+  from_name: string;
+  from_email: string;
+}
+
+/** What the settings form sends. An empty `password` keeps the stored one. */
+export interface EmailSettingsInput {
+  provider: "google" | "custom";
+  host: string;
+  port: number;
+  security: "starttls" | "tls" | "none";
+  username: string;
+  password?: string | null;
+  clear_password?: boolean;
+  from_name: string;
+  from_email: string;
+}
+
+/** A named notification rule: a saved filter plus recipients and an on/off. */
+export interface EmailRule {
+  id: number;
+  name: string;
+  enabled: boolean;
+  text: string | null;
+  filters: Filter[];
+  recipients: string[];
+}
+
+export interface EmailRuleInput {
+  id?: number | null;
+  name: string;
+  enabled: boolean;
+  text?: string | null;
+  filters: Filter[];
+  /** Free text; the backend splits on `;`, `,` and whitespace. */
+  recipients: string;
+}
+
+export interface EmailLogEntry {
+  at: string;
+  rule_id: number | null;
+  rule_name: string;
+  recipients: string;
+  matched: number;
+  status: "sent" | "failed" | "skipped" | string;
+  error: string | null;
+}
+
+export interface EmailStatus {
+  watermark_id: number;
+  enabled_rules: number;
+  act_count: number;
+}
+
 /* -------------------------------------------------------------- commands --- */
 
 export const getState = () => invoke<AppSnapshot>("get_state");
@@ -158,6 +223,29 @@ export const searchFiles = (
   limit = 500,
   offset = 0
 ) => invoke<SearchPage>("search_files", { query, sortBy, ascending, limit, offset });
+
+/* ------------------------------------------------------ email commands ----- */
+
+export const getEmailSettings = () => invoke<EmailSettings>("get_email_settings");
+export const saveEmailSettings = (settings: EmailSettingsInput) =>
+  invoke<EmailSettings>("save_email_settings", { settings });
+export const testEmailConnection = () => invoke<void>("test_email_connection");
+export const sendTestEmail = (to: string) =>
+  invoke<void>("send_test_email", { to });
+
+export const listEmailRules = () => invoke<EmailRule[]>("list_email_rules");
+export const saveEmailRule = (rule: EmailRuleInput) =>
+  invoke<EmailRule>("save_email_rule", { rule });
+export const deleteEmailRule = (id: number) =>
+  invoke<void>("delete_email_rule", { id });
+
+export const getEmailStatus = () => invoke<EmailStatus>("get_email_status");
+export const listEmailLog = (limit = 50) =>
+  invoke<EmailLogEntry[]>("list_email_log", { limit });
+
+/** Manual run. `send: false` is a dry run; `sinceWatermark: false` matches all acts. */
+export const runEmailRulesNow = (send: boolean, sinceWatermark: boolean) =>
+  invoke<EmailLogEntry[]>("run_email_rules_now", { send, sinceWatermark });
 
 /* ------------------------------------------------------------- formatting -- */
 

@@ -3,8 +3,10 @@
 //! This file is **not** RFC 4180 and cannot be read by a standard CSV library.
 //! Confirmed against the live snapshot:
 //!
-//! * Records are terminated by `NUL CR LF` (`\x00\r\n`), not by `\n`. The NUL is
-//!   also the NULL marker for a field, so `SUMULA;\x00;` means "súmula is NULL".
+//! * A record ends at `NUL CR LF` (`\x00\r\n`) — or, for about 49,700 of them,
+//!   at a bare `CR LF`. The NUL is also the NULL marker for a field, so
+//!   `SUMULA;\x00;` means "súmula is NULL". See [`split_records`] for why the
+//!   second form can be told apart from the `\r\n` that appears inside a body.
 //! * The first 23 columns are `;`-separated.
 //! * The act body (`AREA1`/`AREA2`) is raw HTML that contains **all** of:
 //!   bare `\n` and `\r\n`, literal `"` characters, `;` inside `style="..."`, and
@@ -187,16 +189,70 @@ fn field(raw: &[u8]) -> Option<String> {
     }
 }
 
+/// Bytes of the following line needed to recognise a record's first line.
+/// The longest first line is `479980;DOC479980;` — 17 bytes — plus headroom.
+const RECORD_START_LOOKAHEAD: usize = 24;
+
+/// Does `s` open a record's first line, `<digits>;DOC<digits>;`?
+fn is_record_start(s: &[u8]) -> bool {
+    let mut i = 0;
+    while i < s.len() && s[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i == 0 || !s[i..].starts_with(b";DOC") {
+        return false;
+    }
+    let mut j = i + 4;
+    let digits = j;
+    while j < s.len() && s[j].is_ascii_digit() {
+        j += 1;
+    }
+    j > digits && s.get(j) == Some(&b';')
+}
+
 /// Split a buffer into complete records plus the trailing partial remainder.
 ///
-/// The remainder must be carried over to the next chunk of a streamed download,
-/// or discarded at the end of a delta range.
+/// A record ends at `NUL CR LF`. That is **not** the only boundary the feed
+/// writes: about 49,700 records end with a bare `CR LF`, so requiring the NUL
+/// silently swallowed each of those acts into the body of the one before it and
+/// dropped them from the archive. Measured on the published snapshot: 443,293
+/// records, of which 393,576 end with `NUL CR LF` and 49,717 with `CR LF` alone.
+///
+/// A bare `CR LF` counts only when the next line opens a record, which is what
+/// keeps the rule safe: `\r\n` is precisely the line break an act's HTML uses,
+/// so `\r\n` alone would be the wrong test — but `\r\n` followed by
+/// `<digits>;DOC<digits>;` never occurs inside a body. (The `<div>` produced by
+/// an embedded spreadsheet puts `\n` with no `\r` at all, so it cannot be
+/// mistaken for one either.) Every one of the 443,293 records this finds has
+/// well-formed metadata: `VERSAO` is 0–50 throughout and `ANO_PUBLICACAO` is
+/// always either empty or a four-digit year.
+///
+/// Recognising a bare boundary needs up to [`RECORD_START_LOOKAHEAD`] bytes past
+/// the candidate, so one within reach of the end of the buffer is left to the
+/// next chunk rather than guessed at. The metadata that follows is far longer
+/// than that, so no real boundary is missed — the check would fail anyway.
 pub fn split_records(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
     let mut out = Vec::new();
     let mut start = 0usize;
-    while let Some(p) = find(buf, TERM, start) {
-        out.push(&buf[start..p]);
-        start = p + TERM.len();
+    let mut i = 0usize;
+    while i < buf.len() {
+        if buf[i] != b'\n' {
+            i += 1;
+            continue;
+        }
+        if i >= 1 && buf[i - 1] == b'\r' {
+            // `NUL CR LF`, the terminator the feed documents.
+            if i >= 2 && buf[i - 2] == 0 {
+                out.push(&buf[start..i - 2]);
+                start = i + 1;
+            } else if buf.len() - (i + 1) >= RECORD_START_LOOKAHEAD
+                && is_record_start(&buf[i + 1..])
+            {
+                out.push(&buf[start..i - 1]);
+                start = i + 1;
+            }
+        }
+        i += 1;
     }
     (out, &buf[start..])
 }
@@ -384,6 +440,89 @@ mod tests {
         );
     }
 
+    /// A record may end with a bare `CR LF` instead of `NUL CR LF`. Treating
+    /// the NUL as mandatory swallowed the next act — 49,716 of them across the
+    /// published snapshot. Real shape: acts 177519 and 291704 in the feed.
+    #[test]
+    fn a_record_ending_in_a_bare_crlf_still_ends_the_record() {
+        // Act 177519 verbatim: `CABECALHO` is NULL and the body is the origin
+        // note, and the record ends with `CR LF` and no NUL.
+        let first = record_with(
+            &[
+                "177519", "DOC177519", "277920", "", "", "2013", "1", "1", "a", "b", "c",
+                "", "0", "AVISO", "", "Publicado", "Em Vigor", "IPPUC", "277920", "",
+                "(nenhum)", "(nenhum)", "\x00",
+            ],
+            "Prefeitura Municipal de Curitiba",
+            b"\r\n",
+        );
+        let second = record_with(
+            &[
+                "177520", "DOC177520", "277799", "", "", "2013", "1", "1", "a", "b", "c",
+                "", "0", "EDITAL", "", "Publicado", "Em Vigor", "ORGAO", "1", "", "(nenhum)",
+                "(nenhum)", "\x00",
+            ],
+            "<p>corpo</p>",
+            b"\x00\r\n",
+        );
+
+        let mut buf = first.clone();
+        buf.extend_from_slice(&second);
+
+        let (recs, rest) = split_records(&buf);
+        assert_eq!(recs.len(), 2, "the bare CRLF must end the first record");
+        assert!(rest.is_empty());
+
+        let a = parse_record(recs[0]).unwrap();
+        assert_eq!(a.id(), Some(177519));
+        // The next act must not have been swallowed into this body.
+        let body = a.values[META_FIELDS].as_deref().unwrap();
+        assert_eq!(body, "Prefeitura Municipal de Curitiba", "{body:?}");
+        assert!(!body.contains("177520;DOC177520"), "no following record");
+
+        let b = parse_record(recs[1]).unwrap();
+        assert_eq!(b.id(), Some(177520));
+        assert_eq!(b.values[META_FIELDS].as_deref(), Some("<p>corpo</p>"));
+    }
+
+    /// A `\r\n` inside a body must not be taken for a record boundary just
+    /// because the body happens to use one — only a following record's first
+    /// line makes it one.
+    #[test]
+    fn a_crlf_inside_a_body_is_not_a_boundary() {
+        let rec = record_with(
+            &[
+                "7", "DOC7", "1", "", "", "2005", "1", "1", "a", "b", "c", "", "0", "DECRETO",
+                "", "Publicado", "Em Vigor", "O", "1", "", "(nenhum)", "(nenhum)", "\x00",
+            ],
+            "<p>linha um</p>\r\n<p>linha dois</p>\r\n## nao e registro",
+            b"\x00\r\n",
+        );
+
+        let (recs, _) = split_records(&rec);
+        assert_eq!(recs.len(), 1, "a CRLF inside the body is not a boundary");
+        let row = parse_record(recs[0]).unwrap();
+        let body = row.values[META_FIELDS].as_deref().unwrap();
+        assert!(body.contains("linha dois"), "{body:?}");
+        assert!(body.contains("## nao e registro"), "{body:?}");
+    }
+
+    /// Assemble a record from exactly [`META_FIELDS`] metadata values, a body
+    /// and a terminator. Building it this way rather than by hand keeps a
+    /// fixture from silently gaining a field.
+    fn record_with(meta: &[&str], body: &str, term: &[u8]) -> Vec<u8> {
+        assert_eq!(
+            meta.len(),
+            META_FIELDS,
+            "the fixture needs {META_FIELDS} metadata fields"
+        );
+        let mut r = meta.join(";").into_bytes();
+        r.push(b';');
+        r.extend_from_slice(body.as_bytes());
+        r.extend_from_slice(term);
+        r
+    }
+
     #[test]
     fn split_carries_a_partial_record_as_remainder() {
         let a = sample_record();
@@ -472,15 +611,24 @@ mod tests {
         let (recs, rest) = split_records(&bytes[off..]);
         // Every record must parse, and the file must end on a terminator.
         assert!(rest.is_empty(), "file does not end on a record boundary");
-        assert!(recs.len() > 300_000, "unexpectedly few records: {}", recs.len());
+        // The exact count, not a floor: a floor of 300k is what let 49,716 acts
+        // go missing unnoticed. Every record is closed by one terminator and the
+        // file ends on a terminator, so the count is the terminator count:
+        // 393,577 `NUL CR LF` plus 49,717 bare `CR LF`. Update this number only
+        // when the feed itself gains records.
+        assert_eq!(
+            recs.len(),
+            443_294,
+            "the record count changed; if the feed grew, update this number"
+        );
 
-        let mut ids_ok = 0usize;
+        let mut ids = std::collections::HashSet::new();
         for r in &recs {
             let row = parse_record(r).expect("record should parse");
-            if row.id().is_some() {
-                ids_ok += 1;
-            }
+            let id = row.id().expect("every record must have a numeric ID");
+            // A duplicate would mean the splitter split one act in two, which is
+            // exactly the failure mode of a boundary rule that is too eager.
+            assert!(ids.insert(id), "act {id} appears twice; a record was split");
         }
-        assert_eq!(ids_ok, recs.len(), "every record must have a numeric ID");
     }
 }

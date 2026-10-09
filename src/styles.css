@@ -331,6 +331,12 @@ body {
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  /*
+   * O respiro abaixo das abas vinha do `.hero`, que só existe no explorador;
+   * aqui ele é da própria tela, para a barra de ferramentas não encostar no
+   * separador das abas nas outras telas.
+   */
+  padding-top: var(--spacing-scale-2x);
 }
 
 .toolbar {
@@ -767,4 +773,211 @@ body {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* ---------- email automático ---------- */
+
+/* O texto de apoio abaixo da barra de ferramentas. */
+.email-hint {
+  margin: 0;
+  padding: var(--spacing-scale-base) var(--spacing-scale-3x) 0;
+  color: var(--color-secondary-07);
+  font-size: var(--font-size-scale-down-01);
+}
+
+.email-status {
+  color: var(--color-secondary-07);
+  font-size: var(--font-size-scale-down-01);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.app-table .col-rule-name {
+  width: 20%;
+}
+.app-table .col-rule-cond {
+  width: 34%;
+}
+.app-table .col-rule-dest {
+  width: 26%;
+}
+.app-table .col-rule-on {
+  width: 8%;
+  text-align: center;
+}
+.app-table .col-rule-actions {
+  width: 12%;
+}
+
+.app-table .col-rule-actions .br-button {
+  margin-right: var(--spacing-scale-half);
+}
+
+/* O histórico é uma lista simples: hora, resultado, regra e quantos atos. */
+.email-log {
+  flex-shrink: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: var(--spacing-scale-2x) var(--spacing-scale-3x);
+  border-top: 1px solid var(--border-color);
+}
+
+.email-log ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-scale-half);
+}
+
+.email-log li {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-scale-base);
+  font-size: var(--font-size-scale-down-01);
+}
+
+.email-log-time {
+  color: var(--color-secondary-07);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.email-log-rule {
+  font-weight: var(--font-weight-semi-bold);
+}
+
+.section-title {
+  margin: 0 0 var(--spacing-scale-base);
+  font-size: var(--font-size-scale-down-01);
+  font-weight: var(--font-weight-semi-bold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-secondary-07);
+}
+
+.muted {
+  color: var(--color-secondary-07);
+  margin: 0;
+}
+
+.danger-text {
+  color: var(--color-danger);
+}
+
+/* Formulário dos painéis: rótulo visível acima do controle. */
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-scale-2x);
+  max-width: 640px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-scale-half);
+}
+
+/*
+ * Campos e botões na mesma linha.
+ *
+ * O design system não alinha esses controles em linha: cada campo recebe
+ * `margin-top: 4px` (`.br-input input`, `.br-select select`), enquanto
+ * `.br-button` é um `inline-flex` com `height` — uma altura explícita faz o
+ * `align-items: stretch` (o padrão) resolver para `flex-start`, deixando o
+ * botão 8px acima do campo. Um `align-items: center` sozinho melhora, mas ainda
+ * deixa o campo 2px abaixo, porque o `margin-top` entra no cálculo.
+ *
+ * Por isso o alinhamento aqui é pelas linhas de base *reais*: a mesma
+ * `margin-top` é dada a quem não tem (o botão) e, então, todos os topos
+ * coincidem. A altura é fixada em `--app-control-h`, a mesma do `.br-select
+ * select`, para que um botão ao lado de um campo não fique mais alto que ele.
+ * O `min-width: 0` deixa os campos encolherem em vez de estourar a linha.
+ */
+.form-row,
+.password-row,
+.rule-filter {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--spacing-scale-half);
+}
+
+.form-row > *,
+.password-row > *,
+.rule-filter > * {
+  margin-top: var(--spacing-scale-half);
+  min-width: 0;
+}
+
+.form-row .br-input input,
+.password-row .br-input input,
+.rule-filter .br-input input,
+.form-row .br-select select,
+.rule-filter .br-select select {
+  margin-top: 0;
+}
+
+.password-row .br-button,
+.rule-filter .br-button {
+  height: var(--app-control-h);
+  width: var(--app-control-h);
+  --button-size: var(--app-control-h);
+}
+
+/* Dois campos lado a lado respiram mais que um campo e um botão. */
+.form-row {
+  gap: var(--spacing-scale-base);
+}
+
+.form-row .form-field {
+  flex: 1;
+}
+
+.password-row .br-input {
+  flex: 1;
+}
+
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-scale-base);
+  flex-wrap: wrap;
+}
+
+.form-actions .spacer {
+  flex: 1;
+}
+
+/* Uma condição da regra: coluna, operador, valor e o botão de remover. */
+.rule-filters {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--spacing-scale-base);
+}
+
+/*
+ * `min-width: 0` em todos os filhos, e não só no `.br-select`: como `.br-select`
+ * do design system nasce com `min-width: 210px`, uma condição no drawer ficaria
+ * mais larga que o formulário e empurraria o botão de remover para fora da
+ * linha. O `flex: 1` do campo de valor divide o que sobra entre coluna e
+ * operador.
+ */
+.rule-filter > * {
+  min-width: 0;
+}
+
+.rule-filter .br-select {
+  flex: 0 1 auto;
+}
+
+.rule-filter .br-input {
+  flex: 1;
+}
+
+/* O interruptor fica melhor alinhado ao lado do rótulo do que empilhado. */
+.form-field .br-switch {
+  align-items: center;
 }

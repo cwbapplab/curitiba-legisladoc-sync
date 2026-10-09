@@ -12,13 +12,14 @@ import {
   syncNow,
 } from "./api";
 import ActsView from "./ActsView";
+import EmailView from "./EmailView";
 import ExplorerView from "./ExplorerView";
 import { Button, Icon, Message, Preload, Select } from "./components";
 
 /** Cadências oferecidas no seletor de atualização automática. */
 const INTERVAL_CHOICES = [15, 30, 60, 180, 720];
 
-type Page = "atos" | "explorador";
+type Page = "atos" | "explorador" | "email";
 
 export default function App() {
   const [page, setPage] = useState<Page>("atos");
@@ -149,14 +150,18 @@ export default function App() {
   const tabs: { id: Page; label: string }[] = [
     { id: "atos", label: "Atos" },
     { id: "explorador", label: "Explorador rsync" },
+    { id: "email", label: "Email automático" },
   ];
 
-  // Setas movem o foco entre as abas, como manda o padrão de tablist.
+  // Setas movem o foco entre as abas, como manda o padrão de tablist. Percorre a
+  // lista pela posição (e não por um par fixo), para valer com qualquer número
+  // de abas e envolver o fim.
   const onTabKey = (e: React.KeyboardEvent) => {
     if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
     e.preventDefault();
-    const next = page === "atos" ? "explorador" : "atos";
-    setPage(next);
+    const dir = e.key === "ArrowRight" ? 1 : -1;
+    const i = tabs.findIndex((t) => t.id === page);
+    setPage(tabs[(i + dir + tabs.length) % tabs.length].id);
     tabsRef.current?.querySelector<HTMLButtonElement>('[aria-selected="true"]')?.focus();
   };
 
@@ -245,55 +250,62 @@ export default function App() {
         </div>
       </header>
 
-      <section className="hero" aria-label="Resumo do acervo">
-        {/*
-          Quatro números do acervo. Nenhum é um gráfico: cada um é uma
-          quantidade isolada, que se lê melhor como número grande com rótulo do
-          que como barra. Os valores usam numerais tabulares para não dançarem
-          de largura quando a atualização os muda.
-        */}
-        <div className="tiles">
-          <Tile
-            label="Atos publicados"
-            value={report ? report.total_rows.toLocaleString("pt-BR") : "—"}
-            note={
-              report?.action === "appended" && report.rows_added > 0 ? (
-                <span className="delta-good">
-                  +{report.rows_added.toLocaleString("pt-BR")} nesta atualização
-                </span>
-              ) : (
-                "no acervo local"
-              )
-            }
-          />
-          <Tile
-            label="Arquivos na origem"
-            value={summary ? summary.total_files.toLocaleString("pt-BR") : "—"}
-            note={
-              summary
-                ? `mais recente em ${formatDate(summary.newest_mtime)}`
-                : "consultando a origem…"
-            }
-          />
-          <Tile
-            label="Volume publicado"
-            value={
-              summary
-                ? formatBytes(summary.listed_bytes || summary.total_bytes)
-                : "—"
-            }
-            note="somando todos os arquivos"
-          />
-          <Tile
-            label="Alterados em 1 dia"
-            value={summary ? summary.recent_count.toLocaleString("pt-BR") : "—"}
-            note="arquivos com data recente"
-          />
-        </div>
-        <div className="source" title={snapshot?.source}>
-          {snapshot?.source ?? ""}
-        </div>
-      </section>
+      {/*
+        O resumo é do acervo da origem (o que o rsync baixa), não dos atos já
+        indexados: ele pertence à aba do explorador, e nas outras telas só
+        ocuparia a altura que a tabela precisa.
+      */}
+      {page === "explorador" && (
+        <section className="hero" aria-label="Resumo do acervo">
+          {/*
+            Quatro números do acervo. Nenhum é um gráfico: cada um é uma
+            quantidade isolada, que se lê melhor como número grande com rótulo
+            do que como barra. Os valores usam numerais tabulares para não
+            dançarem de largura quando a atualização os muda.
+          */}
+          <div className="tiles">
+            <Tile
+              label="Atos publicados"
+              value={report ? report.total_rows.toLocaleString("pt-BR") : "—"}
+              note={
+                report?.action === "appended" && report.rows_added > 0 ? (
+                  <span className="delta-good">
+                    +{report.rows_added.toLocaleString("pt-BR")} nesta atualização
+                  </span>
+                ) : (
+                  "no acervo local"
+                )
+              }
+            />
+            <Tile
+              label="Arquivos na origem"
+              value={summary ? summary.total_files.toLocaleString("pt-BR") : "—"}
+              note={
+                summary
+                  ? `mais recente em ${formatDate(summary.newest_mtime)}`
+                  : "consultando a origem…"
+              }
+            />
+            <Tile
+              label="Volume publicado"
+              value={
+                summary
+                  ? formatBytes(summary.listed_bytes || summary.total_bytes)
+                  : "—"
+              }
+              note="somando todos os arquivos"
+            />
+            <Tile
+              label="Alterados em 1 dia"
+              value={summary ? summary.recent_count.toLocaleString("pt-BR") : "—"}
+              note="arquivos com data recente"
+            />
+          </div>
+          <div className="source" title={snapshot?.source}>
+            {snapshot?.source ?? ""}
+          </div>
+        </section>
+      )}
 
       {preparing && !(error || lastSync?.error) ? (
         <Preload
@@ -317,11 +329,11 @@ export default function App() {
             </div>
           )}
 
-          {page === "atos" ? (
-            <ActsView refreshToken={refreshToken} />
-          ) : (
+          {page === "atos" && <ActsView refreshToken={refreshToken} />}
+          {page === "explorador" && (
             <ExplorerView refreshToken={refreshToken} syncing={syncing} />
           )}
+          {page === "email" && <EmailView refreshToken={refreshToken} />}
         </>
       )}
     </div>

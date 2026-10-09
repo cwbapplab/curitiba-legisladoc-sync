@@ -163,6 +163,11 @@ pub struct ActQuery {
     /// is given explicitly.
     pub text: Option<String>,
     pub filters: Vec<Filter>,
+    /// Only acts whose `ID` is strictly above this, used to restrict a query to
+    /// what a sync just appended. `ID` is not exposed as a filterable column —
+    /// that list is UI-facing — so the floor is its own field.
+    #[serde(default)]
+    pub min_id: Option<i64>,
     pub sort: Option<String>,
     pub ascending: bool,
     pub limit: i64,
@@ -241,6 +246,10 @@ impl Store {
             "#,
         )
         .context("creating base schema")?;
+        // The email notification tables share this file and connection. Creating
+        // them here keeps a single startup path (and covers `open_in_memory`, so
+        // the email tests get the schema for free).
+        crate::email::init_schema(&conn)?;
         Ok(Store { conn })
     }
 
@@ -629,6 +638,13 @@ impl Store {
                 if esc { " ESCAPE '\\'" } else { "" }
             ));
             binds.push(Box::new(f.op.param(&f.value)));
+        }
+
+        // The "newly appended" floor. Bound like any other value; `a."ID"` is the
+        // INTEGER PRIMARY KEY (rowid), and `from_clause` always aliases `acts` as `a`.
+        if let Some(floor) = q.min_id {
+            clauses.push(format!("a.\"ID\" > ?{}", binds.len() + 1));
+            binds.push(Box::new(floor));
         }
 
         let where_sql = if clauses.is_empty() {
@@ -1186,6 +1202,54 @@ mod tests {
             })
             .unwrap();
         assert_eq!(r.total, 0, "the value must be bound, not executed");
+    }
+
+    #[test]
+    fn min_id_keeps_only_rows_above_the_floor() {
+        let s = seeded();
+        // Both rows match the LIKE, but only id 2 sits above the floor.
+        let q = |min_id| ActQuery {
+            filters: vec![Filter {
+                column: "NUMERO_IDENTIFICACAO".into(),
+                op: Op::Like,
+                value: "DOC".into(),
+            }],
+            min_id,
+            limit: 10,
+            ..Default::default()
+        };
+        assert_eq!(s.search(&q(None)).unwrap().total, 2);
+        assert_eq!(s.search(&q(Some(1))).unwrap().total, 1);
+        assert_eq!(s.search(&q(Some(1))).unwrap().rows[0].id, 2);
+        assert_eq!(s.search(&q(Some(2))).unwrap().total, 0, "the floor is exclusive");
+    }
+
+    #[test]
+    fn min_id_composes_with_text_and_can_stand_alone() {
+        let s = seeded();
+        // "conselho" matches id 1, which is not above the floor; the text hit and
+        // the floor must both hold, not either.
+        let r = s
+            .search(&ActQuery {
+                text: Some("conselho".into()),
+                min_id: Some(1),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.total, 0);
+
+        // No conditions at all plus a floor is "every act newer than the floor",
+        // which is a legitimate rule (notify me about anything new).
+        let r = s
+            .search(&ActQuery {
+                min_id: Some(1),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(r.total, 1);
+        assert_eq!(r.rows[0].id, 2);
     }
 
     #[test]

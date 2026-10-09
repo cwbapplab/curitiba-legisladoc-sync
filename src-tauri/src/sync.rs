@@ -287,16 +287,19 @@ fn plan_for(
     // Only worth verifying the boundary if we are about to rely on it.
     let head_prefix_ok = match &state {
         Some(s) if s.offset > 0 && remote_size > s.offset => {
-            // Re-read the terminator that should sit just before our offset. If
-            // it is still there, the prefix we ingested has not been rewritten
-            // and the bytes from `offset` onward are new.
+            // Re-read the bytes ending just before our offset. If they still
+            // close a record, the prefix we ingested has not been rewritten and
+            // the bytes from `offset` onward are new. Either terminator counts:
+            // the feed closes about 49,700 records with a bare `CR LF`, and
+            // insisting on the `NUL CR LF` form would force a full re-ingest on
+            // every one of those boundaries.
             let from = s.offset.saturating_sub(parser::TERM_LEN as u64);
             match remote::get_tail(url, from) {
                 Ok(r) => {
                     let mut buf = [0u8; parser::TERM_LEN];
-                    std::io::Read::read_exact(&mut std::io::Read::take(r, parser::TERM_LEN as u64), &mut buf)
-                        .is_ok()
-                        && buf == parser::TERM
+                    let n = std::io::Read::read(&mut std::io::Read::take(r, parser::TERM_LEN as u64), &mut buf)
+                        .unwrap_or(0);
+                    ingest::ends_on_boundary(&buf[..n])
                 }
                 Err(_) => false,
             }
@@ -566,7 +569,9 @@ mod tests {
         let loaded = ingest_stream(&mut store, SlowReader::new(file), size, |_, _| {}).unwrap();
 
         assert_eq!(loaded.rows, store.act_count().unwrap());
-        assert!(loaded.rows > 300_000, "unexpectedly few rows: {}", loaded.rows);
+        // The exact count, so a splitter that silently drops records — the
+        // 49,716 acts lost to bare-`CR LF` boundaries — cannot pass unnoticed.
+        assert_eq!(loaded.rows, 443_294, "the ingest lost or invented records");
         // Every record has a numeric primary key, so the max must be set.
         assert!(store.max_act_id().unwrap().unwrap() > 0);
 
