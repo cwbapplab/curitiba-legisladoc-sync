@@ -1,331 +1,374 @@
 # Legisladoc Sync
 
-**English** · [Português (BR)](README.pt-BR.md)
+[English](README.en.md) · **Português (BR)**
 
-Desktop app to browse, search and monitor the **Legisladoc** act feed published by
-the City of Curitiba. It mirrors the feed's rsync listing, keeps a local SQLite
-index with full-text search, and can e-mail newly published acts that match
-saved rules.
+Aplicativo desktop para consultar, buscar e monitorar o acervo de atos do
+**Legisladoc** publicado pela Prefeitura de Curitiba. Ele espelha a listagem
+rsync do feed, mantém um índice SQLite local com busca em texto integral e pode
+enviar por e-mail os atos recém-publicados que correspondam a regras salvas.
 
-![Atos tab](docs/snapshots/01-atos.png)
+![Aba Atos](docs/snapshots/01-atos.png)
 
-## Contents
+## Sumário
 
-- [How to use](#how-to-use)
-  - [First run](#first-run)
+- [Como usar](#como-usar)
+  - [Primeira execução](#primeira-execução)
   - [Atos](#atos)
   - [Explorador rsync](#explorador-rsync)
   - [Email automático](#email-automático)
-  - [Gmail SMTP with an app password](#gmail-smtp-with-an-app-password)
-  - [Local data and privacy](#local-data-and-privacy)
-- [Developer guide](#developer-guide)
+  - [Gmail via SMTP com senha de app](#gmail-via-smtp-com-senha-de-app)
+  - [Dados locais e privacidade](#dados-locais-e-privacidade)
+  - [Janela, bandeja e segundo plano](#janela-bandeja-e-segundo-plano)
+- [Guia do desenvolvedor](#guia-do-desenvolvedor)
   - [Stack](#stack)
-  - [Requirements](#requirements)
-  - [Getting started](#getting-started)
-  - [Project layout](#project-layout)
-  - [How a sync works](#how-a-sync-works)
-  - [Data model](#data-model)
-  - [Tests](#tests)
-  - [Troubleshooting](#troubleshooting)
-- [Dependencies used](#dependencies-used)
-- [License](#license)
+  - [Requisitos](#requisitos)
+  - [Como começar](#como-começar)
+  - [Estrutura do projeto](#estrutura-do-projeto)
+  - [Como a sincronização funciona](#como-a-sincronização-funciona)
+  - [Modelo de dados](#modelo-de-dados)
+  - [Testes](#testes)
+  - [Solução de problemas](#solução-de-problemas)
+- [Dependências usadas](#dependências-usadas)
+- [Licença](#licença)
 
-## How to use
+## Como usar
 
-### First run
+### Primeira execução
 
-The app reads the public feed at
-`rsync://dadosabertos.c3sl.ufpr.br/dadosabertos/curitiba/Legisladoc/` and mirrors
-it into a local database.
+O aplicativo lê o feed público em
+`rsync://dadosabertos.c3sl.ufpr.br/dadosabertos/curitiba/Legisladoc/` e o
+espelha em um banco de dados local.
 
-1. Open **Legisladoc Sync**. The first load reads the whole act snapshot
-   (roughly 1.4 GB) and indexes it, which can take a few minutes depending on
-   the connection. A progress screen shows each phase: checking the source,
-   reading the field definitions, downloading/indexing, and fetching new acts.
-2. The status pill in the header shows what happened last: "Ainda não
-   sincronizado", "Atualizado há 2 minutos · +120 atos novos", or an error
-   message.
-3. Choose how often the app should refresh in **Automático** (15 min, 30 min,
-   1 h, 3 h or 12 h; default 1 h). **Atualizar agora** forces a refresh.
-4. Subsequent refreshes are incremental: if the published act file has the same
-   size and ETag, nothing is downloaded; otherwise only rows above the stored
-   maximum ID are merged into the local index.
+1. Abra o **Legisladoc Sync**. A primeira carga lê o acervo inteiro de atos
+   (cerca de 1,4 GB) e o indexa, o que pode levar alguns minutos dependendo da
+   conexão. Uma tela de preparação mostra cada fase: verificando a origem,
+   lendo os campos, baixando/indexando e buscando os atos novos.
+2. A pastilha de status no cabeçalho mostra o que aconteceu por último: "Ainda
+   não sincronizado", "Atualizado há 2 minutos · +120 atos novos" ou uma
+   mensagem de erro.
+3. Escolha a frequência de atualização em **Automático** (15 min, 30 min, 1 h,
+   3 h ou 12 h; padrão 1 h). **Atualizar agora** força uma atualização.
+4. As atualizações seguintes são incrementais: se o arquivo de atos publicado
+   tiver o mesmo tamanho e ETag, nada é baixado; caso contrário, apenas as
+   linhas com ID acima do máximo armazenado são mescladas ao índice local.
 
-> The first load and full reloads do **not** send e-mail notifications. They
-> only establish the baseline ("watermark") from which new acts are counted.
+> A primeira carga e as recargas completas **não** enviam notificações por
+> e-mail. Elas apenas estabelecem a linha de base ("watermark") a partir da qual
+> os atos novos são contados.
 
 ### Atos
 
-The default tab lists published acts with full-text search.
+A aba inicial lista os atos publicados com busca em texto integral.
 
-- Type in the search box (or press `Ctrl+F`) to search the integral text of the
-  acts. Matching excerpts are highlighted in the last column.
-- Use the four filters — built from the feed's own field labels: act type,
-  originating agency, current status and publication year — to narrow the list.
-  Values and counts come from the local database. A filter stays disabled when
-  the feed defines no values for that column.
-- Click a column header to sort; click again to reverse. The list shows 100 acts
-  per page.
-- Click a row (or focus it and press `Enter`) to open the detail drawer with
-  every field from the feed, the act body, and a box to send that act by e-mail.
-- `Esc`/the close button dismisses the drawer.
+- Digite na caixa de busca (ou pressione `Ctrl+F`) para pesquisar no texto
+  integral dos atos. Os trechos correspondentes aparecem destacados na última
+  coluna.
+- Use os quatro filtros — montados a partir dos rótulos de campo do próprio
+  feed: tipo do ato, órgão de origem, situação atual e ano de publicação — para
+  reduzir a lista. Os valores e as contagens vêm do banco local. Um filtro fica
+  desabilitado quando o feed não define valores para aquela coluna.
+- Clique no cabeçalho de uma coluna para ordenar; clique de novo para inverter.
+  A lista mostra 100 atos por página.
+- Clique em uma linha (ou foque-a e pressione `Enter`) para abrir a gaveta de
+  detalhes com todos os campos do feed, o corpo do ato e uma caixa para enviar
+  aquele ato por e-mail.
+- `Esc`/o botão de fechar dispensa a gaveta.
 
-![Act detail drawer](docs/snapshots/04-detalhe-ato.png)
+![Gaveta de detalhes do ato](docs/snapshots/04-detalhe-ato.png)
 
 ### Explorador rsync
 
-![Explorador rsync tab](docs/snapshots/02-explorador.png)
+![Aba Explorador rsync](docs/snapshots/02-explorador.png)
 
-A raw view of what the server publishes — including files the app does not
-parse — so you can check whether the local copy is current.
+Uma visão crua do que o servidor publica — inclusive os arquivos que o
+aplicativo não interpreta — para conferir se a cópia local está atualizada.
 
-- Four tiles summarise the archive: published acts, files at the origin, total
-  volume, and files changed in the last day.
-- Search file names, sort by file/size/modified date, and look at the
-  **Sincronizado** column to see which files were already ingested. Files
-  changed within the last 7 days carry a **novo** tag.
-- The footer shows the full path of the selected file.
+- Quatro indicadores resumem o acervo: atos publicados, arquivos na origem,
+  volume total e arquivos alterados no último dia.
+- Busque nomes de arquivo, ordene por arquivo/tamanho/data de modificação e
+  confira a coluna **Sincronizado** para ver quais arquivos já foram ingeridos.
+  Arquivos alterados nos últimos 7 dias recebem a etiqueta **novo**.
+- O rodapé mostra o caminho completo do arquivo selecionado.
 
 ### Email automático
 
-![Email automático tab](docs/snapshots/03-email.png)
+![Aba Email automático](docs/snapshots/03-email.png)
 
-Two concepts live here: **rules** (a saved filter with recipients and an
-on/off switch) and the **SMTP settings** behind the gear button.
+Dois conceitos convivem aqui: **regras** (um filtro salvo, com destinatários e
+um liga/desliga) e a **configuração de SMTP**, atrás do botão de engrenagem.
 
-1. Open the gear (**Configurar servidor de e-mail**) and fill in the SMTP
-   server. For Gmail, see the walkthrough below.
-2. **Nova regra** creates a rule: a name, an optional full-text term, one or
-   more conditions (column, operator, value, joined by `e`/`ou`), recipients
-   separated by `;` or `,`, and the **Regra ativa** switch.
-3. Rules run after an **automatic** sync, against the acts appended since the
-   last notification. A rule that matches sends one e-mail listing up to 100
-   acts; a larger match says how many were left out rather than sending
-   thousands of rows.
-4. **Simular** runs every enabled rule over the **whole archive** so you can
-   check the filters without sending anything.
-5. **Histórico** lists the last notifications per rule, including skipped and
-   failed runs with their error message.
+1. Abra a engrenagem (**Configurar servidor de e-mail**) e preencha o servidor
+   SMTP. Para o Gmail, siga o passo a passo abaixo.
+2. **Nova regra** cria uma regra: um nome, um termo opcional de texto integral,
+   uma ou mais condições (coluna, operador, valor, combinadas com `e`/`ou`),
+   destinatários separados por `;` ou `,` e o interruptor **Regra ativa**.
+3. As regras rodam após uma sincronização **automática**, sobre os atos
+   acrescentados desde a última notificação. Uma regra que casa envia um
+   e-mail listando até 100 atos; se houver mais, a mensagem informa quantos
+   ficaram de fora em vez de enviar milhares de linhas.
+4. **Simular** executa todas as regras ativas sobre **todo o acervo**, para você
+   conferir os filtros sem enviar nada.
+5. **Histórico** lista as últimas notificações por regra, incluindo execuções
+   ignoradas e com falha, com a mensagem de erro.
 
-A manual refresh (**Atualizar agora**) never sends e-mail: the acts matched by
-the rules appear in an in-app alert instead.
+Uma atualização manual (**Atualizar agora**) nunca envia e-mail: os atos que
+casam com as regras aparecem em um alerta dentro do aplicativo.
 
-### Gmail SMTP with an app password
+### Gmail via SMTP com senha de app
 
-Gmail does not accept your normal account password over SMTP. It requires a
-**16-character app password**, which in turn requires 2-Step Verification.
+O Gmail não aceita a senha normal da conta por SMTP. É preciso usar uma **senha
+de app de 16 caracteres**, que por sua vez exige a verificação em duas etapas.
 
-1. Sign in to the Google account that will send the messages.
-2. Enable 2-Step Verification: <https://myaccount.google.com/security> →
-   **How you sign in to Google** → **2-Step Verification**. App passwords are
-   not offered while 2FA is off.
-3. Open <https://myaccount.google.com/apppasswords>.
-4. Enter a name such as `Legisladoc Sync` and click **Create**.
-5. Copy the 16-character password shown (spaces are ignored). Google shows it
-   only once; if you lose it, create another.
-6. In the app, open **Email automático** → gear icon.
-7. Set **Provedor** to **Google (Gmail)**. Host, port and security are filled in
-   automatically: `smtp.gmail.com`, port `587`, `STARTTLS`.
-8. Fill in:
-   - **Usuário**: the full Gmail address (for example `name@gmail.com`).
-   - **Senha**: the 16-character app password (not the account password).
-   - **Remetente (nome)** and **Remetente (e-mail)**: what recipients will see.
-     The e-mail should be the same account, or an alias configured in Gmail.
-9. Click **Salvar**, then **Testar conexão**. A success message means the TLS
-   handshake and authentication worked.
-10. Type a destination in **Enviar e-mail de teste para** and click
-    **Testar envio** to confirm the whole path.
+1. Entre na conta Google que enviará as mensagens.
+2. Ative a verificação em duas etapas: <https://myaccount.google.com/security> →
+   **Como você faz login no Google** → **Verificação em duas etapas**. As senhas
+   de app não são oferecidas enquanto a verificação estiver desligada.
+3. Abra <https://myaccount.google.com/apppasswords>.
+4. Informe um nome como `Legisladoc Sync` e clique em **Criar**.
+5. Copie a senha de 16 caracteres exibida (os espaços são ignorados). O Google
+   a mostra apenas uma vez; se perdê-la, crie outra.
+6. No aplicativo, abra **Email automático** → ícone de engrenagem.
+7. Defina **Provedor** como **Google (Gmail)**. Servidor, porta e segurança são
+   preenchidos automaticamente: `smtp.gmail.com`, porta `587`, `STARTTLS`.
+8. Preencha:
+   - **Usuário**: o endereço Gmail completo (por exemplo `nome@gmail.com`).
+   - **Senha**: a senha de app de 16 caracteres (não a senha da conta).
+   - **Remetente (nome)** e **Remetente (e-mail)**: o que os destinatários verão.
+     O e-mail deve ser a mesma conta, ou um alias configurado no Gmail.
+9. Clique em **Salvar** e depois em **Testar conexão**. Uma mensagem de sucesso
+   significa que o TLS e a autenticação funcionaram.
+10. Digite um destino em **Enviar e-mail de teste para** e clique em
+    **Testar envio** para confirmar o caminho completo.
 
-Notes and limits:
+![Configuração do servidor de e-mail — preset Google (Gmail)](docs/snapshots/05-servidor-email-google.png)
 
-- If **App passwords** is missing, the account belongs to a Google Workspace
-  domain whose administrator disabled them, or Advanced Protection is on. In
-  that case use a custom SMTP relay or an account that allows app passwords.
-- The old "less secure app access" option no longer exists and cannot be used.
-- Gmail applies daily sending quotas (free accounts: roughly 500 recipients per
-  day; Workspace accounts have higher limits). Keep rules specific to stay well
-  below them.
-- The app password can be revoked at any time on the same Google page; delete
-  it there and create a new one for the app.
-- The password is stored encrypted (AES-256-GCM) in the local database, with the
-  key in `email.key` beside it. This protects a copied `.sqlite` file, not a
-  local attacker who can read your whole user profile.
+Com o preset Google, servidor, porta e segurança são preenchidos
+automaticamente, e a gaveta lembra que o Gmail exige uma senha de app de 16
+caracteres.
 
-### Local data and privacy
+**Usando outro servidor SMTP.** Se não for Gmail, escolha **Servidor
+personalizado (SMTP)** e informe o servidor manualmente:
 
-Everything runs locally. The app talks only to the Legisladoc feed/mirror and to
-the SMTP server you configure.
+![Configuração do servidor de e-mail — servidor SMTP personalizado](docs/snapshots/06-servidor-email-custom.png)
 
-- Database: `%APPDATA%\com.cwbapplab.legisladoc-sync\legisladoc.sqlite`
-- Encryption key for the SMTP password: `email.key` in the same directory
-- Logs: written by `tauri-plugin-log` in the application log directory
-- No telemetry, analytics or third-party servers beyond those above
+- **Servidor (host)** e **Porta**: o endpoint SMTP; **Segurança** é `STARTTLS`
+  na porta 587, `TLS` na 465, ou `Sem TLS` apenas para um relay local.
+- **Usuário** e **Senha**: as credenciais SMTP. A senha é guardada cifrada
+  (AES-256-GCM) e nunca é exibida novamente.
+- **Remetente (nome/e-mail)**: o que os destinatários veem. Alguns servidores
+  exigem que esse endereço coincida com a conta autenticada.
+- Use sempre **Testar conexão** antes de salvar e depois **Testar envio**.
 
-## Developer guide
+Observações e limites:
+
+- Se **Senhas de app** não aparecer, a conta pertence a um domínio do Google
+  Workspace cujo administrador desativou o recurso, ou o Programa de Proteção
+  Avançada está ativo. Nesse caso, use um relay SMTP próprio ou uma conta que
+  permita senhas de app.
+- A opção antiga "acesso a apps menos seguros" não existe mais e não pode ser
+  usada.
+- O Gmail aplica cotas diárias de envio (contas gratuitas: cerca de 500
+  destinatários por dia; contas Workspace têm limites maiores). Mantenha as
+  regras específicas para ficar bem abaixo delas.
+- A senha de app pode ser revogada a qualquer momento na mesma página do
+  Google; apague-a lá e crie outra para o aplicativo.
+- A senha é guardada cifrada (AES-256-GCM) no banco local, com a chave em
+  `email.key` ao lado dele. Isso protege um arquivo `.sqlite` copiado, mas não
+  um invasor local que consiga ler todo o seu perfil de usuário.
+
+### Dados locais e privacidade
+
+Tudo roda localmente. O aplicativo conversa apenas com o feed/espelho do
+Legisladoc e com o servidor SMTP que você configurar.
+
+- Banco de dados: `%APPDATA%\com.cwbapplab.legisladoc-sync\legisladoc.sqlite`
+- Chave de cifra da senha SMTP: `email.key` no mesmo diretório
+- Logs: gravados pelo `tauri-plugin-log` no diretório de logs da aplicação
+- Sem telemetria, analytics ou servidores de terceiros além dos citados
+
+### Janela, bandeja e segundo plano
+
+Fechar a janela não encerra o aplicativo: ele vai para a bandeja do sistema para
+que a atualização automática e as regras de e-mail continuem rodando. Uma
+notificação avisa que ele segue em segundo plano.
+
+- **Clique com o botão esquerdo** no ícone da bandeja para reabrir a janela.
+- **Clique com o botão direito** para abrir o menu: **Abrir Legisladoc Sync**
+  (igual ao clique esquerdo) e **Sair**, que encerra o aplicativo e suas
+  sincronizações agendadas.
+
+Use **Sair** quando quiser realmente encerrar; o botão de fechar da janela
+apenas a esconde.
+
+## Guia do desenvolvedor
 
 ### Stack
 
-- **Shell:** [Tauri 2](https://tauri.app) (Rust backend + system WebView2)
-- **Frontend:** React 19 + TypeScript, bundled by Vite 8
+- **Shell:** [Tauri 2](https://tauri.app) (backend Rust + WebView2 do sistema)
+- **Front end:** React 19 + TypeScript, empacotado pelo Vite 8
 - **UI:** [GOVBR-DS](https://www.gov.br/ds/) (`@govbr-ds/core`)
-- **Storage:** SQLite compiled into the binary (`rusqlite` with `bundled`),
-  including FTS5 for full-text search
-- **HTTP:** `ureq` with rustls (feed mirror)
-- **rsync:** `arrsync`, vendored under `src-tauri/vendor/arrsync` with a small
-  Windows fix
+- **Armazenamento:** SQLite compilado no binário (`rusqlite` com `bundled`),
+  incluindo FTS5 para busca em texto integral
+- **HTTP:** `ureq` com rustls (espelho do feed)
+- **rsync:** `arrsync`, vendorizado em `src-tauri/vendor/arrsync` com uma
+  pequena correção para Windows
 - **E-mail:** `lettre` (SMTP + STARTTLS/TLS)
 
-### Requirements
+### Requisitos
 
-- Windows 10/11 x64 (WebView2 runtime is preinstalled on Windows 11 and on
-  up-to-date Windows 10)
-- [Node.js](https://nodejs.org) 20.19+ or 22.12+ (Vite 8 requirement)
-- Rust stable with the MSVC toolchain, plus the **Desktop development with C++**
-  workload from Visual Studio Build Tools
-- About 3 GB free disk space for the local database after the first load
+- Windows 10/11 x64 (o runtime WebView2 já vem no Windows 11 e em Windows 10
+  atualizado)
+- [Node.js](https://nodejs.org) 20.19+ ou 22.12+ (exigência do Vite 8)
+- Rust estável com a toolchain MSVC e a carga de trabalho **Desenvolvimento
+  para desktop com C++** do Visual Studio Build Tools
+- Cerca de 3 GB livres em disco para o banco local após a primeira carga
 
-### Getting started
+### Como começar
 
 ```powershell
 npm install
-npm run tauri dev      # Vite on :1420 + the Tauri window
+npm run tauri dev      # Vite em :1420 + a janela do Tauri
 ```
 
-Other scripts:
+Outros scripts:
 
-| Command | What it does |
+| Comando | O que faz |
 | --- | --- |
-| `npm run dev` | Vite dev server only (front end in a browser has no Tauri IPC) |
-| `npm run build` | Type-check (`tsc`) and build the front end into `dist/` |
-| `npm run tauri build` | Build the installers (MSI/NSIS) into `src-tauri/target/release/bundle/` |
-| `cd src-tauri; cargo test` | Rust unit/integration tests |
-| `cd src-tauri; cargo test -- --ignored` | Tests that hit the live feed (network) |
+| `npm run dev` | Apenas o servidor do Vite (o front no navegador não tem IPC do Tauri) |
+| `npm run build` | Checagem de tipos (`tsc`) e build do front em `dist/` |
+| `npm run tauri build` | Gera os instaladores (MSI/NSIS) em `src-tauri/target/release/bundle/` |
+| `cd src-tauri; cargo test` | Testes unitários/de integração do Rust |
+| `cd src-tauri; cargo test -- --ignored` | Testes que acessam o feed real (rede) |
 
-### Project layout
+### Estrutura do projeto
 
 ```
 .
-├── src/                     React front end
-│   ├── App.tsx              shell: header, tabs, status, interval, sync
-│   ├── ActsView.tsx         act search, filters, table, pagination
-│   ├── ActDetailDrawer.tsx  act details + "send by e-mail"
-│   ├── ExplorerView.tsx     raw rsync file listing
-│   ├── EmailView.tsx        SMTP settings, rules, simulation, history
-│   ├── api.ts               typed wrappers over the Tauri commands
-│   ├── components.tsx       GOVBR-DS controls used by the screens
-│   └── styles.css           application layout on top of the design system
+├── src/                     Front end React
+│   ├── App.tsx              shell: cabeçalho, abas, status, intervalo, sync
+│   ├── ActsView.tsx         busca de atos, filtros, tabela, paginação
+│   ├── ActDetailDrawer.tsx  detalhes do ato + "enviar por e-mail"
+│   ├── ExplorerView.tsx     listagem crua de arquivos do rsync
+│   ├── EmailView.tsx        configuração SMTP, regras, simulação, histórico
+│   ├── api.ts               wrappers tipados dos comandos Tauri
+│   ├── components.tsx       controles do GOVBR-DS usados nas telas
+│   └── styles.css           layout da aplicação sobre o design system
 ├── src-tauri/
 │   ├── src/
-│   │   ├── lib.rs           app setup, commands, background sync loop
-│   │   ├── feed.rs          rsync listing (arrsync)
-│   │   ├── remote.rs        HTTP HEAD/GET against the Apache mirror
-│   │   ├── sync.rs          orchestration: list → schema → dimensions → acts
-│   │   ├── schema.rs        `Info.xml` → tables/columns/relations
-│   │   ├── parser.rs        streaming CSV parsing and value normalisation
-│   │   ├── db.rs            SQLite schema, sync/rsync bookkeeping
-│   │   ├── store.rs         query layer: search, facets, filters, sorting
-│   │   ├── email.rs         SMTP settings, rules, watermark, delivery
-│   │   └── vendor/arrsync   patched rsync client
-│   ├── tauri.conf.json      window, CSP, bundling
-│   └── capabilities/        Tauri permissions
-└── docs/snapshots/          screenshots used in this README
+│   │   ├── lib.rs           setup do app, comandos, laço de sincronização
+│   │   ├── feed.rs          listagem rsync (arrsync)
+│   │   ├── remote.rs        HEAD/GET HTTP contra o espelho Apache
+│   │   ├── sync.rs          orquestração: listagem → schema → dimensões → atos
+│   │   ├── schema.rs        `Info.xml` → tabelas/colunas/relações
+│   │   ├── parser.rs        leitura de CSV em streaming e normalização
+│   │   ├── db.rs            schema SQLite, registros de sync/rsync
+│   │   ├── store.rs         camada de consulta: busca, facetas, filtros, ordem
+│   │   ├── email.rs         SMTP, regras, watermark, envio
+│   │   └── vendor/arrsync   cliente rsync corrigido
+│   ├── tauri.conf.json      janela, CSP, empacotamento
+│   └── capabilities/        permissões do Tauri
+└── docs/snapshots/          capturas usadas neste README
 ```
 
-### How a sync works
+### Como a sincronização funciona
 
-1. **List the feed over rsync.** Only metadata is transferred; the module lists
-   the files and their dates/sizes. File names carry the snapshot date, so the
-   newest revision of each table is selected from the listing.
-2. **Read `Info.xml`.** This is the feed's own description of the CSV layout.
-   The act and dimension tables are created from it, so a snapshot that adds or
-   renames a column is stored correctly instead of silently truncated.
-3. **Replace the dimension tables** (`ORGAO`, `TIPO_ATO`, `SITUACAO_ACAO`, …).
-   They are a few KB each, so a wholesale replace avoids diffing.
-4. **Import the act snapshot.** `HEAD` the file: if size and ETag match the last
-   imported revision, the refresh stops there. Otherwise the CSV is streamed
-   into a staging table (`acts_import`), the rows whose `ID` is above the stored
-   maximum are merged into `acts`, the FTS5 index is updated, and the staging
-   table is dropped.
-5. **Notify.** After an automatic sync, enabled e-mail rules run against the
-   newly appended acts (watermark-based). A manual sync shows the matches in the
-   UI and sends nothing.
+1. **Lista o feed via rsync.** Só metadados são transferidos; o módulo lista os
+   arquivos com datas e tamanhos. Os nomes carregam a data do snapshot, então a
+   revisão mais nova de cada tabela é escolhida a partir da listagem.
+2. **Lê o `Info.xml`.** É a descrição do próprio feed para o layout dos CSVs.
+   As tabelas de atos e dimensões são criadas a partir dele, então um snapshot
+   que acrescenta ou renomeia uma coluna é armazenado corretamente em vez de
+   truncado em silêncio.
+3. **Substitui as tabelas de dimensões** (`ORGAO`, `TIPO_ATO`, `SITUACAO_ACAO`,
+   …). São poucos KB cada, então uma substituição integral evita diff.
+4. **Importa o snapshot de atos.** Faz um `HEAD`: se tamanho e ETag forem iguais
+   aos da última revisão importada, a atualização para aí. Caso contrário, o CSV
+   é lido em streaming para uma tabela de estágio (`acts_import`), as linhas com
+   `ID` acima do máximo armazenado são mescladas em `acts`, o índice FTS5 é
+   atualizado e a tabela de estágio é descartada.
+5. **Notifica.** Depois de uma sincronização automática, as regras de e-mail
+   ativas rodam sobre os atos recém-acrescentados (com base no watermark). Uma
+   sincronização manual mostra os resultados na interface e não envia nada.
 
-Progress is emitted as events (`sync-started`, `ingest-progress`,
-`sync-complete`, `sync-matches`) so long first loads show a real progress screen.
+O progresso é emitido como eventos (`sync-started`, `ingest-progress`,
+`sync-complete`, `sync-matches`), para que a primeira carga mostre uma tela de
+progresso real.
 
-### Data model
+### Modelo de dados
 
-| Table | Purpose |
+| Tabela | Finalidade |
 | --- | --- |
-| `acts` | Act records, columns generated from `Info.xml` |
-| `acts_fts` | FTS5 index over the act header/body |
-| `acts_import` | Staging table for a downloaded snapshot (temporary) |
-| dimension tables | `ORGAO`, `TIPO_ATO`, `SITUACAO_ACAO`, … from the feed |
-| `rsync_files` | Last rsync listing (path, size, mtime, ingest time) |
-| `syncs` | History of refreshes, with errors |
-| `email_settings` | Single row: SMTP configuration (encrypted password) |
-| `email_rules` | Saved filters + recipients + enabled flag |
-| `email_log` | Per-rule notification history |
-| `email_state` | Watermark: highest act ID already notified about |
+| `acts` | Registros de atos, colunas geradas a partir do `Info.xml` |
+| `acts_fts` | Índice FTS5 sobre o cabeçalho/corpo dos atos |
+| `acts_import` | Tabela de estágio do snapshot baixado (temporária) |
+| tabelas de dimensão | `ORGAO`, `TIPO_ATO`, `SITUACAO_ACAO`, … vindas do feed |
+| `rsync_files` | Última listagem rsync (caminho, tamanho, mtime, ingestão) |
+| `syncs` | Histórico de atualizações, com erros |
+| `email_settings` | Linha única: configuração SMTP (senha cifrada) |
+| `email_rules` | Filtros salvos + destinatários + flag de ativação |
+| `email_log` | Histórico de notificações por regra |
+| `email_state` | Watermark: maior ID de ato já notificado |
 
-### Tests
+### Testes
 
 ```powershell
 cd src-tauri
 cargo test
 ```
 
-The suite covers CSV parsing, schema generation, filtering/sorting validation,
-watermark behaviour and sync orchestration. Network tests are marked `#[ignore]`
-and can be run with `cargo test -- --ignored` when online.
+A suíte cobre leitura de CSV, geração de schema, validação de filtros e ordem,
+comportamento do watermark e orquestração da sincronização. Os testes de rede
+são marcados com `#[ignore]` e podem ser executados com
+`cargo test -- --ignored` quando houver internet.
 
-### Troubleshooting
+### Solução de problemas
 
-- **Port 1420 already in use** — another Vite/Tauri dev instance is running.
-  Stop it; `vite.config.ts` uses `strictPort`.
-- **`cargo` cannot find a linker** — install Visual Studio Build Tools with the
-  C++ workload and reopen the terminal.
-- **Blank window / connection refused** — `npm run tauri dev` starts Vite; if
-  the window opens before it, reload with `Ctrl+R`.
-- **First load looks stuck** — the status pill and the preparation screen show
-  the current phase. A 1.4 GB download over a slow link takes a while; the
-  transfer timeout is 30 minutes.
-- **Gmail returns `535 5.7.8 Username and Password not accepted`** — you used
-  the account password instead of an app password, or 2FA is off. Recreate the
-  app password and paste it again.
-- **Database locked** — close other instances of the app; SQLite allows one
-  writer at a time.
+- **Porta 1420 em uso** — há outra instância de desenvolvimento (Vite/Tauri)
+  rodando. Encerre-a; `vite.config.ts` usa `strictPort`.
+- **O `cargo` não encontra o linker** — instale o Visual Studio Build Tools com
+  a carga C++ e reabra o terminal.
+- **Janela em branco / conexão recusada** — `npm run tauri dev` inicia o Vite;
+  se a janela abrir antes dele, recarregue com `Ctrl+R`.
+- **A primeira carga parece travada** — a pastilha de status e a tela de
+  preparação mostram a fase atual. Um download de 1,4 GB em link lento demora; o
+  tempo limite de transferência é de 30 minutos.
+- **O Gmail retorna `535 5.7.8 Username and Password not accepted`** — foi usada
+  a senha da conta em vez da senha de app, ou a verificação em duas etapas está
+  desligada. Crie outra senha de app e cole novamente.
+- **Banco bloqueado** — feche outras instâncias do aplicativo; o SQLite permite
+  apenas um escritor por vez.
 
-## Dependencies used
+## Dependências usadas
 
-The full inventory — 475 Rust crates and 36 npm packages, with versions,
-license expressions, copyright notices and the full text of every license — is
-in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) (and in Portuguese in
-[THIRD-PARTY-NOTICES.pt-BR.md](THIRD-PARTY-NOTICES.pt-BR.md)).
+O inventário completo — 475 crates Rust e 36 pacotes npm, com versões,
+expressões de licença, avisos de copyright e o texto integral de cada licença —
+está em [THIRD-PARTY-NOTICES.pt-BR.md](THIRD-PARTY-NOTICES.pt-BR.md) (e em
+inglês em [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)).
 
-Main runtime dependencies:
+Principais dependências de execução:
 
-| Dependency | Used for |
+| Dependência | Uso |
 | --- | --- |
-| `tauri` / `tauri-plugin-log` | Desktop shell, IPC commands, logging |
-| `rusqlite` (`bundled`) | SQLite storage and FTS5 full-text index |
-| `ureq` (+ `rustls`) | HTTP access to the feed's Apache mirror |
-| `arrsync` (vendored) | rsync protocol listing |
-| `roxmltree` | Parsing the feed's `Info.xml` schema |
-| `encoding_rs` | Decoding the CSV files' character set |
-| `tokio` | Async runtime for rsync/HTTP work |
-| `chrono`, `url`, `anyhow`, `log` | Dates, URLs, error handling, logging |
-| `lettre` | SMTP delivery (STARTTLS/TLS) |
-| `aes-gcm` | Encrypting the stored SMTP password |
-| `react`, `react-dom` | UI |
-| `@tauri-apps/api` | Front end ↔ backend bridge |
-| `@govbr-ds/core` | GOVBR-DS design system |
+| `tauri` / `tauri-plugin-log` | Shell desktop, comandos IPC, logs |
+| `rusqlite` (`bundled`) | Armazenamento SQLite e índice FTS5 |
+| `ureq` (+ `rustls`) | Acesso HTTP ao espelho Apache do feed |
+| `arrsync` (vendorizado) | Listagem pelo protocolo rsync |
+| `roxmltree` | Leitura do schema `Info.xml` do feed |
+| `encoding_rs` | Decodificação do conjunto de caracteres dos CSVs |
+| `tokio` | Runtime assíncrono para rsync/HTTP |
+| `chrono`, `url`, `anyhow`, `log` | Datas, URLs, erros e logs |
+| `lettre` | Envio SMTP (STARTTLS/TLS) |
+| `aes-gcm` | Cifra da senha SMTP armazenada |
+| `react`, `react-dom` | Interface |
+| `@tauri-apps/api` | Ponte front end ↔ backend |
+| `@govbr-ds/core` | Design system GOVBR-DS |
 
-Build and development: `vite`, `@vitejs/plugin-react`, `typescript`,
+Build e desenvolvimento: `vite`, `@vitejs/plugin-react`, `typescript`,
 `@types/react`, `@types/react-dom`, `@tauri-apps/cli`, `tauri-build`.
 
-## License
+## Licença
 
-MIT — Copyright (c) 2026 cwbapplab. See [LICENSE](LICENSE) for the license and
-the additional **"AS IS"** disclaimer. Third-party components keep their own
-licenses; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+MIT — Copyright (c) 2026 cwbapplab. Veja [LICENSE.pt-BR](LICENSE.pt-BR) para a
+licença e o aviso adicional de uso **"COMO ESTÁ"**. Componentes de terceiros
+mantêm suas próprias licenças; veja
+[THIRD-PARTY-NOTICES.pt-BR.md](THIRD-PARTY-NOTICES.pt-BR.md).
