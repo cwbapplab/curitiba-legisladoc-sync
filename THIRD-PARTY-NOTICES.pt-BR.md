@@ -1,6 +1,6 @@
 # Avisos de Terceiros — Legisladoc Sync
 
-**Legisladoc Sync** versão 0.1.0 — Copyright (c) 2026 Erick
+**Legisladoc Sync** versão 0.1.0 — Copyright (c) 2026 cwbapplab
 
 O Legisladoc Sync é distribuído sob a [Licença MIT](LICENSE.pt-BR). Ele é
 fornecido **"COMO ESTÁ" (AS IS), sem garantia de qualquer tipo**, conforme o
