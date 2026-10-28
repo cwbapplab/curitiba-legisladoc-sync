@@ -16,6 +16,7 @@ saved rules.
   - [Atos](#atos)
   - [Explorador rsync](#explorador-rsync)
   - [Email automático](#email-automático)
+  - [Creating a rule](#creating-a-rule)
   - [Gmail SMTP with an app password](#gmail-smtp-with-an-app-password)
   - [Local data and privacy](#local-data-and-privacy)
   - [Window, tray and background](#window-tray-and-background)
@@ -110,6 +111,35 @@ on/off switch) and the **SMTP settings** behind the gear button.
 
 A manual refresh (**Atualizar agora**) never sends e-mail: the acts matched by
 the rules appear in an in-app alert instead.
+
+### Creating a rule
+
+![New rule](docs/snapshots/07-nova-regra.png)
+
+1. Open **Email automático** and click **+ Nova regra**.
+2. **Nome da regra**: a short, recognizable label, for example
+   `Decretos da saúde`.
+3. **Buscar no texto integral (opcional)**: a term that must appear in the act
+   text. Leave it empty to require no term.
+4. **Condições**: click **+ Adicionar condição** to filter by column. Each
+   condition has a **Coluna** (the fields the feed allows filtering on), an
+   **Operador** (is equal to, is different from, contains, greater than or equal
+   to, less than or equal to) and a **Valor**. From the second condition on, a
+   **Conector** (`e` for *and*, `ou` for *or*) joins it to the previous one.
+   With no conditions at all, the rule matches **every** new act.
+5. **Destinatários**: separate addresses with `;` or `,`, for example
+   `equipe@exemplo.com; chefe@exemplo.com`.
+6. **Regra ativa**: keep it on for the rule to run; turn it off to save the rule
+   without sending anything.
+7. Click **Salvar**. The rule joins the list with its filter summarised in the
+   **Condição** column.
+8. Use **Simular** to test the rule against the **whole archive** before relying
+   on it, and check **Histórico** after each automatic refresh.
+
+![Condition row](docs/snapshots/08-nova-regra-condicao.png)
+
+Rules are evaluated only against acts that are **new** in an automatic refresh;
+the first load sends nothing, and a manual refresh only shows the in-app alert.
 
 ### Gmail SMTP with an app password
 

@@ -16,6 +16,7 @@ enviar por e-mail os atos recém-publicados que correspondam a regras salvas.
   - [Atos](#atos)
   - [Explorador rsync](#explorador-rsync)
   - [Email automático](#email-automático)
+  - [Criando uma regra](#criando-uma-regra)
   - [Gmail via SMTP com senha de app](#gmail-via-smtp-com-senha-de-app)
   - [Dados locais e privacidade](#dados-locais-e-privacidade)
   - [Janela, bandeja e segundo plano](#janela-bandeja-e-segundo-plano)
@@ -113,6 +114,36 @@ um liga/desliga) e a **configuração de SMTP**, atrás do botão de engrenagem.
 
 Uma atualização manual (**Atualizar agora**) nunca envia e-mail: os atos que
 casam com as regras aparecem em um alerta dentro do aplicativo.
+
+### Criando uma regra
+
+![Nova regra](docs/snapshots/07-nova-regra.png)
+
+1. Abra **Email automático** e clique em **+ Nova regra**.
+2. **Nome da regra**: um rótulo curto e reconhecível, por exemplo
+   `Decretos da saúde`.
+3. **Buscar no texto integral (opcional)**: um termo que precise aparecer no
+   texto do ato. Deixe vazio para não exigir termo.
+4. **Condições**: clique em **+ Adicionar condição** para filtrar por coluna.
+   Cada condição tem **Coluna** (os campos que o feed permite filtrar),
+   **Operador** (é igual a, é diferente de, contém, maior ou igual a, menor ou
+   igual a) e **Valor**. A partir da segunda condição aparece o **Conector**
+   (`e` ou `ou`). Sem nenhuma condição, a regra casa com **todos** os atos
+   novos.
+5. **Destinatários**: separe os endereços por `;` ou `,`, por exemplo
+   `equipe@exemplo.com; chefe@exemplo.com`.
+6. **Regra ativa**: deixe ligado para a regra ser aplicada; desligue para
+   guardá-la sem enviar nada.
+7. Clique em **Salvar**. A regra entra na lista com o filtro resumido na coluna
+   **Condição**.
+8. Use **Simular** para testar a regra sobre **todo o acervo** antes de confiar
+   nela, e confira **Histórico** depois de cada atualização automática.
+
+![Condição preenchida](docs/snapshots/08-nova-regra-condicao.png)
+
+As regras são avaliadas apenas sobre os atos **novos** de cada atualização
+automática; a primeira carga não envia nada e uma atualização manual apenas
+mostra o alerta na tela.
 
 ### Gmail via SMTP com senha de app
 
