@@ -11,20 +11,24 @@ import {
   Logic,
   Op,
   QueryCapabilities,
+  RuleMatches,
   actColumnValues,
   deleteEmailRule,
+  formatActDate,
   formatDate,
   getEmailSettings,
   getEmailStatus,
   listEmailLog,
   listEmailRules,
   queryCapabilities,
-  runEmailRulesNow,
   saveEmailRule,
   saveEmailSettings,
   sendTestEmail,
+  simulateEmailRulePage,
+  simulateEmailRules,
   testEmailConnection,
 } from "./api";
+import { DetailDrawer } from "./ActDetailDrawer";
 import {
   Button,
   Divider,
@@ -47,6 +51,9 @@ const OPS: { value: Op; label: string }[] = [
   { value: "lte", label: "menor ou igual a" },
 ];
 
+/** Atos por regra em cada página da simulação. */
+const PAGE_SIZE = 20;
+
 interface Props {
   refreshToken: number;
 }
@@ -68,6 +75,11 @@ export default function EmailView({ refreshToken }: Props) {
 
   const [editing, setEditing] = useState<EmailRule | "new" | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [preview, setPreview] = useState<RuleMatches[] | null>(null);
+  /** Deslocamento (em atos) da página aberta de cada regra. */
+  const [pageOf, setPageOf] = useState<Record<number, number>>({});
+  const [loadingRule, setLoadingRule] = useState<number | null>(null);
+  const [openActId, setOpenActId] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -122,18 +134,14 @@ export default function EmailView({ refreshToken }: Props) {
     }
   };
 
-  const runNow = async (send: boolean) => {
+  const simulate = async () => {
     setBusy(true);
-    setNotice(null);
+    setError(null);
     try {
-      const entries = await runEmailRulesNow(send, false);
-      setLog(entries);
-      const total = entries.reduce((n, e) => n + (e.matched || 0), 0);
-      setNotice(
-        send
-          ? `Execução concluída: ${total} ato(s) casaram. Veja o histórico abaixo.`
-          : `Simulação: ${total} ato(s) casariam. Nada foi enviado.`
-      );
+      // Cada regra é testada sobre todo o acervo e volta com a primeira página
+      // dos atos que casaram. Nada é enviado e o histórico fica intocado.
+      setPageOf({});
+      setPreview(await simulateEmailRules(PAGE_SIZE));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -141,19 +149,37 @@ export default function EmailView({ refreshToken }: Props) {
     }
   };
 
+  // Troca a página de uma regra só: as demais seções ficam como estão.
+  const goToPage = async (ruleId: number, offset: number) => {
+    setLoadingRule(ruleId);
+    try {
+      const page = await simulateEmailRulePage(ruleId, offset, PAGE_SIZE);
+      setPreview((ms) =>
+        ms ? ms.map((m) => (m.rule.id === ruleId ? page : m)) : ms
+      );
+      setPageOf((p) => ({ ...p, [ruleId]: offset }));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoadingRule(null);
+    }
+  };
+
+  // O rótulo do campo `SUMULA` vem do próprio feed ("Resumo/Assunto do Ato").
+  // O texto fixo cobre a janela em que `caps` ainda não chegou.
+  const sumulaLabel =
+    caps?.labels.find(([c]) => c === "SUMULA")?.[1] ?? "Resumo/Assunto do Ato";
+
   return (
     <div className="view">
       <div className="toolbar">
         <Button emphasis="primary" onClick={() => setEditing("new")}>
           <Icon name="plus" /> Nova regra
         </Button>
-        <Button onClick={() => runNow(false)} disabled={busy}>
+        <Button onClick={simulate} disabled={busy}>
           Simular
         </Button>
-        <Button onClick={() => runNow(true)} disabled={busy}>
-          Enviar agora
-        </Button>
-        {busy && <Loading inline label="Executando regras" />}
+        {busy && <Loading inline label="Simulando" />}
         <span className="spacer" />
         <div className="email-status" role="status" aria-live="polite">
           {status
@@ -175,7 +201,9 @@ export default function EmailView({ refreshToken }: Props) {
         As regras são aplicadas aos atos <strong>novos</strong> de cada
         atualização automática. Se um ato recém-publicado casar com o filtro de
         uma regra ativa, os detalhes dele são enviados por e-mail. A primeira
-        carga não envia nada.
+        carga não envia nada. Para testar as regras sobre <strong>todo o
+        acervo</strong>, sem enviar nada, use{" "}
+        <strong>Simular</strong>.
       </p>
 
       {error && (
@@ -294,10 +322,216 @@ export default function EmailView({ refreshToken }: Props) {
         />
       )}
 
+      {preview && (
+        <SimulationDrawer
+          matches={preview}
+          pageOf={pageOf}
+          loadingRule={loadingRule}
+          sumulaLabel={sumulaLabel}
+          onPage={goToPage}
+          onOpenAct={setOpenActId}
+          onClose={() => setPreview(null)}
+        />
+      )}
+
+      {openActId !== null && (
+        <DetailDrawer id={openActId} onClose={() => setOpenActId(null)} />
+      )}
+
       {settingsOpen && (
         <SettingsDrawer onClose={() => setSettingsOpen(false)} />
       )}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------- simulação */
+
+/**
+ * O que a simulação mostrou.
+ *
+ * É uma prévia: daqui não sai e-mail nenhum. Cada regra ativa é testada sobre
+ * **todo o acervo** e a seção mostra a página atual dos atos que casaram, com o
+ * pager embaixo — uma regra que casa milhares não fica truncada numa amostra.
+ */
+function SimulationDrawer({
+  matches,
+  pageOf,
+  loadingRule,
+  sumulaLabel,
+  onPage,
+  onOpenAct,
+  onClose,
+}: {
+  matches: RuleMatches[];
+  pageOf: Record<number, number>;
+  loadingRule: number | null;
+  sumulaLabel: string;
+  onPage: (ruleId: number, offset: number) => void;
+  onOpenAct: (id: number) => void;
+  onClose: () => void;
+}) {
+  const total = matches.reduce((n, m) => n + Math.max(0, m.total), 0);
+
+  return (
+    <>
+      <div className="drawer-scrim" onClick={onClose} />
+      <aside
+        className="drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Simulação das regras"
+      >
+        <header className="drawer-head">
+          <div>
+            <div className="drawer-title">Simulação</div>
+            <div className="drawer-sub">
+              {matches.length === 0
+                ? "Nenhuma regra ativa."
+                : `${total.toLocaleString(
+                    "pt-BR"
+                  )} ato(s) casariam em todo o acervo. Nada foi enviado.`}
+            </div>
+          </div>
+          <Button circle ariaLabel="Fechar" onClick={onClose}>
+            <Icon name="close" />
+          </Button>
+        </header>
+
+        <div className="drawer-body">
+          {matches.length === 0 ? (
+            <p className="muted">Nenhuma regra ativa para simular.</p>
+          ) : (
+            matches.map((m) => (
+              <RulePreview
+                key={m.rule.id}
+                match={m}
+                offset={pageOf[m.rule.id] ?? 0}
+                loading={loadingRule === m.rule.id}
+                sumulaLabel={sumulaLabel}
+                onPage={onPage}
+                onOpenAct={onOpenAct}
+              />
+            ))
+          )}
+        </div>
+      </aside>
+    </>
+  );
+}
+
+/** Uma regra da simulação: o cabeçalho, a página de atos e o pager. */
+function RulePreview({
+  match,
+  offset,
+  loading,
+  sumulaLabel,
+  onPage,
+  onOpenAct,
+}: {
+  match: RuleMatches;
+  offset: number;
+  loading: boolean;
+  sumulaLabel: string;
+  onPage: (ruleId: number, offset: number) => void;
+  onOpenAct: (id: number) => void;
+}) {
+  const { rule, total, rows } = match;
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const page = Math.floor(offset / PAGE_SIZE) + 1;
+
+  return (
+    <section className="preview-rule">
+      <h3 className="section-title">
+        {rule.name}
+        <span className="preview-rule-meta">
+          {total < 0
+            ? "filtro inválido"
+            : `${total.toLocaleString("pt-BR")} ato(s)`}{" "}
+          · {rule.recipients.join("; ")}
+        </span>
+      </h3>
+
+      {total < 0 ? (
+        <p className="muted">
+          O filtro usa uma coluna que não existe nos dados atuais.
+        </p>
+      ) : total === 0 ? (
+        <p className="muted">Nenhum ato atende a esta regra.</p>
+      ) : (
+        <>
+          <ul className="preview-acts">
+            {rows.map((r) => (
+              <li
+                key={r.id}
+                tabIndex={0}
+                role="button"
+                aria-label={`Detalhes do ato ${r.numero_identificacao ?? r.id}`}
+                onClick={() => onOpenAct(r.id)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onOpenAct(r.id);
+                  }
+                }}
+              >
+                <span className="ident" title={r.numero_identificacao ?? ""}>
+                  {r.numero_identificacao ?? `#${r.id}`}
+                </span>
+                {r.tipo && <Tag>{r.tipo}</Tag>}
+                <span className="preview-act-date">
+                  {formatActDate(r.data_publicacao)}
+                </span>
+                <span className="preview-act-text" title={r.sumula ?? ""}>
+                  <span className="preview-act-field">{sumulaLabel}:</span>{" "}
+                  {r.sumula ?? "—"}
+                </span>
+              </li>
+            ))}
+          </ul>
+
+          {total > PAGE_SIZE && (
+            <nav
+              className="br-pagination small"
+              aria-label={`Paginação da regra ${rule.name}`}
+            >
+              <ul>
+                <li>
+                  <Button
+                    circle
+                    density="small"
+                    ariaLabel="Página anterior"
+                    disabled={page <= 1 || loading}
+                    onClick={() =>
+                      onPage(rule.id, Math.max(0, offset - PAGE_SIZE))
+                    }
+                  >
+                    <Icon name="chevron-left" />
+                  </Button>
+                </li>
+                <li>
+                  <span className="page active" aria-current="page">
+                    {page}
+                    <span className="sr-only"> de {pages}</span>
+                  </span>
+                </li>
+                <li>
+                  <Button
+                    circle
+                    density="small"
+                    ariaLabel="Próxima página"
+                    disabled={page >= pages || loading}
+                    onClick={() => onPage(rule.id, offset + PAGE_SIZE)}
+                  >
+                    <Icon name="chevron-right" />
+                  </Button>
+                </li>
+              </ul>
+            </nav>
+          )}
+        </>
+      )}
+    </section>
   );
 }
 

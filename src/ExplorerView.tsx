@@ -168,6 +168,8 @@ export default function ExplorerView({ refreshToken, syncing }: Props) {
                   </button>
                 </th>
               ))}
+              {/* Não ordenável: a coluna é um estado, não um critério de busca. */}
+              <th className="col-synced">Sincronizado</th>
             </tr>
           </thead>
           <tbody>
@@ -195,11 +197,22 @@ export default function ExplorerView({ refreshToken, syncing }: Props) {
                 </td>
                 <td className="col-size num">{formatBytes(r.size)}</td>
                 <td className="col-updated num">{formatDate(r.mtime)}</td>
+                <td className="col-synced">
+                  {r.synced_at ? (
+                    <Tag status="info">
+                      sincronizado em {formatDate(r.synced_at)}
+                    </Tag>
+                  ) : (
+                    <span className="muted" aria-label="não sincronizado">
+                      —
+                    </span>
+                  )}
+                </td>
               </tr>
             ))}
             {!loading && rows.length === 0 && (
               <tr className="empty-row">
-                <td colSpan={COLUMNS.length}>
+                <td colSpan={COLUMNS.length + 1}>
                   {query
                     ? `Nenhum arquivo corresponde a “${query}”.`
                     : syncing

@@ -9,13 +9,20 @@ use rusqlite::{params, params_from_iter, Connection, ToSql};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::ingest::SnapshotState;
 use crate::parser::{self, Row};
 use crate::schema::Schema;
 
 /// The act fact table and its full-text index.
 const ACTS: &str = "acts";
 const FTS: &str = "acts_fts";
+
+/// Staging table a freshly downloaded snapshot is loaded into before its new
+/// rows are migrated into `acts`. Dropped as soon as the merge commits.
+const IMPORT: &str = "acts_import";
+
+/// Rows copied per transaction while merging the staging table. Small enough
+/// that the write-ahead log never has to hold a whole snapshot load at once.
+const MERGE_BATCH: i64 = 5_000;
 
 /// Columns that are safe to filter or sort on. Anything else is rejected rather
 /// than interpolated into SQL.
@@ -94,6 +101,7 @@ pub struct ActRow {
     pub numero_oficial: Option<String>,
     pub ano_publicacao: Option<i64>,
     pub data_publicacao: Option<String>,
+    pub data_criacao: Option<String>,
     pub tipo: Option<String>,
     pub orgao: Option<String>,
     pub situacao: Option<String>,
@@ -242,6 +250,31 @@ pub struct Facet {
     pub count: i64,
 }
 
+/// The revision a snapshot file was last imported at.
+///
+/// Only the validators are kept: a refresh is skipped when the remote file still
+/// reports the same size and ETag as the recorded revision.
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotState {
+    /// Size in bytes of the file that was imported.
+    pub size: u64,
+    pub etag: Option<String>,
+}
+
+/// Return the database's free pages to the file.
+///
+/// `PRAGMA incremental_vacuum` yields **one row per page** it releases and only
+/// does that page's work as the row is stepped, so it has to be drained. Run once
+/// — which is all `execute` or `execute_batch` do — it frees exactly one page,
+/// leaving the rest of a dropped staging table's 1.4 GB in the file as a
+/// freelist. Stepping every row through to the end is what actually empties it.
+fn purge_free_pages(conn: &Connection) -> Result<()> {
+    let mut stmt = conn.prepare("PRAGMA incremental_vacuum")?;
+    let mut rows = stmt.query([])?;
+    while rows.next()?.is_some() {}
+    Ok(())
+}
+
 pub struct Store {
     conn: Connection,
 }
@@ -261,6 +294,25 @@ impl Store {
     }
 
     fn init(conn: Connection) -> Result<Self> {
+        // Incremental auto-vacuum is what lets the staging table's space return
+        // to the file once the import drops it. Without it, `DROP TABLE` only
+        // moves those pages to a freelist and the file keeps a second copy of the
+        // snapshot for good. A fresh database takes the setting directly; one
+        // created before it existed needs a single VACUUM to rewrite its header,
+        // which is also what reclaims whatever an earlier run already stranded —
+        // so this is a one-time cost, and only when the setting is still off.
+        let auto_vacuum: i64 = conn.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+        if auto_vacuum == 0 {
+            if let Err(e) = conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;") {
+                log::warn!("enabling incremental auto-vacuum failed: {e:#}");
+            }
+        }
+
+        // The post-import checkpoint that shrinks the write-ahead log must wait
+        // for a brief reader instead of giving up on the first busy moment;
+        // without this the log keeps its peak size.
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
+
         conn.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;
@@ -298,6 +350,10 @@ impl Store {
                 fetched_at TEXT NOT NULL,
                 xml        TEXT NOT NULL
             );
+
+            -- A staging table left behind by a crash is never merged; drop it so
+            -- `begin_import` always starts from a clean slate.
+            DROP TABLE IF EXISTS acts_import;
             "#,
         )
         .context("creating base schema")?;
@@ -305,6 +361,16 @@ impl Store {
         // them here keeps a single startup path (and covers `open_in_memory`, so
         // the email tests get the schema for free).
         crate::email::init_schema(&conn)?;
+
+        // A crashed run can leave a dropped-but-unreclaimed staging table (a
+        // freelist) or a large write-ahead log behind; with nothing else attached
+        // yet, this is a good moment to give that space back.
+        if let Err(e) = purge_free_pages(&conn) {
+            log::warn!("initial purge of free pages failed: {e:#}");
+        }
+        if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+            log::warn!("initial WAL truncate failed: {e:#}");
+        }
         Ok(Store { conn })
     }
 
@@ -428,18 +494,21 @@ impl Store {
 
     // -------------------------------------------------------- snapshot state
 
+    /// The revision a snapshot was last imported at.
+    ///
+    /// Only the validators matter now: if the remote file still has the same size
+    /// and ETag, the import is skipped. The stored offset is kept as "the size we
+    /// imported through", for continuity with the `snapshots` table.
     pub fn snapshot_state(&self, file_name: &str) -> Result<Option<SnapshotState>> {
         let row = self
             .conn
             .query_row(
-                "SELECT byte_offset, etag, last_id, row_count FROM snapshots WHERE file_name = ?1",
+                "SELECT size, etag FROM snapshots WHERE file_name = ?1",
                 params![file_name],
                 |r| {
                     Ok(SnapshotState {
-                        offset: r.get::<_, i64>(0)? as u64,
+                        size: r.get::<_, i64>(0)? as u64,
                         etag: r.get(1)?,
-                        last_id: r.get(2)?,
-                        row_count: r.get(3)?,
                     })
                 },
             )
@@ -447,46 +516,34 @@ impl Store {
         Ok(row)
     }
 
-    /// Record a snapshot's validators up front, without touching the stored
-    /// offset — that only moves once the rows are committed.
-    pub fn upsert_snapshot_meta(
+    /// Record the revision of a snapshot that was imported in full.
+    ///
+    /// Called only after the merge commits: a failed run leaves the previous
+    /// revision in place, so the next refresh retries instead of skipping it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_snapshot(
         &self,
         file_name: &str,
         size: u64,
         etag: Option<&str>,
         last_modified: Option<&str>,
+        last_id: Option<i64>,
+        row_count: i64,
     ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO snapshots (file_name, size, etag, last_modified, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO snapshots
+                (file_name, size, etag, last_modified, byte_offset, last_id, row_count, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?2, ?5, ?6, ?7)
              ON CONFLICT(file_name) DO UPDATE SET
                 size = excluded.size, etag = excluded.etag,
-                last_modified = excluded.last_modified, updated_at = excluded.updated_at",
+                last_modified = excluded.last_modified, byte_offset = excluded.byte_offset,
+                last_id = excluded.last_id, row_count = excluded.row_count,
+                updated_at = excluded.updated_at",
             params![
                 file_name,
                 size as i64,
                 etag,
                 last_modified,
-                chrono::Utc::now().to_rfc3339()
-            ],
-        )?;
-        Ok(())
-    }
-
-    /// Move the offset/row-count watermark after a successful commit.
-    pub fn commit_snapshot_progress(
-        &self,
-        file_name: &str,
-        offset: u64,
-        last_id: Option<i64>,
-        row_count: i64,
-    ) -> Result<()> {
-        self.conn.execute(
-            "UPDATE snapshots SET byte_offset = ?2, last_id = ?3, row_count = ?4, updated_at = ?5
-             WHERE file_name = ?1",
-            params![
-                file_name,
-                offset as i64,
                 last_id,
                 row_count,
                 chrono::Utc::now().to_rfc3339()
@@ -513,28 +570,115 @@ impl Store {
 
     // ------------------------------------------------------------- ingesting
 
-    /// Empty the act data and its index, ready for a full load.
-    pub fn clear_acts(&mut self) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        // 'delete-all' is how an external-content FTS5 table is emptied.
-        tx.execute_batch(&format!(
-            "INSERT INTO {FTS}({FTS}) VALUES('delete-all'); DELETE FROM {ACTS};"
-        ))?;
-        tx.commit()?;
+    /// Create an empty staging table shaped like the act table.
+    ///
+    /// `DROP` first: a run interrupted after this point must never have its
+    /// half-loaded rows merged, so the staging table is always rebuilt from
+    /// scratch. `AS SELECT … WHERE 0` copies the act columns — and their storage
+    /// affinities — without bringing any rows across, so the two always agree.
+    pub fn begin_import(&mut self) -> Result<()> {
+        self.conn
+            .execute_batch(&format!(
+                "DROP TABLE IF EXISTS {IMPORT};
+                 CREATE TABLE {IMPORT} AS SELECT * FROM {ACTS} WHERE 0;"
+            ))
+            .context("creating the staging table")?;
         Ok(())
     }
 
-    /// Insert a batch of parsed rows.
+    /// Copy the staged rows the act table does not already hold.
     ///
-    /// Uses plain INSERT, not upsert: the delta path guarantees new rows carry
-    /// new ids, and a full load clears the tables first. That matters because an
-    /// external-content FTS index cannot be updated in place without the previous
-    /// column values, which this feed does not retain.
-    pub fn insert_rows(&mut self, rows: &[Row]) -> Result<()> {
+    /// `ID` is the merge key: only rows above the stored maximum are new. The
+    /// filter runs in SQL, and the same predicate drives the index update, so the
+    /// act table and its full-text index can never disagree about which rows
+    /// arrived. `?1 IS NULL` covers the first import, when there is no floor yet.
+    ///
+    /// Copied in batches, not one statement: the first import moves ~2.5 GB (the
+    /// acts plus their index), and doing that in a single transaction grows the
+    /// write-ahead log to the size of the database, where it then sits. Chunking
+    /// keeps each transaction small, so a checkpoint can keep the log short.
+    pub fn merge_import(&mut self) -> Result<i64> {
+        let quoted = self
+            .columns_of(ACTS)?
+            .iter()
+            .map(|c| format!("\"{c}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let mut added = 0i64;
+        loop {
+            // Recompute the floor each pass: committing a batch moves the
+            // maximum, so the next `ID > floor` continues where this one stopped.
+            let floor = self.max_act_id()?;
+            let tx = self.conn.transaction()?;
+            let n = tx.execute(
+                &format!(
+                    "INSERT INTO {ACTS} ({quoted})
+                     SELECT {quoted} FROM {IMPORT}
+                     WHERE ?1 IS NULL OR \"ID\" > ?1 ORDER BY \"ID\" LIMIT ?2"
+                ),
+                params![floor, MERGE_BATCH],
+            )?;
+            if n == 0 {
+                tx.commit()?;
+                break;
+            }
+            // Same predicate, so the index receives exactly the rows just copied.
+            tx.execute(
+                &format!(
+                    "INSERT INTO {FTS} (rowid, NUMERO_IDENTIFICACAO, NUMERO_OFICIAL, SUMULA, CABECALHO, body)
+                     SELECT \"ID\", \"NUMERO_IDENTIFICACAO\", \"NUMERO_OFICIAL\", \"SUMULA\", \"CABECALHO\", \"body\"
+                     FROM {IMPORT}
+                     WHERE ?1 IS NULL OR \"ID\" > ?1 ORDER BY \"ID\" LIMIT ?2"
+                ),
+                params![floor, MERGE_BATCH],
+            )?;
+            tx.commit()?;
+            added += n as i64;
+        }
+        Ok(added)
+    }
+
+    /// Drop the staging table once its rows have been merged, and give its space
+    /// back to the file.
+    ///
+    /// `DROP TABLE` on its own only moves the pages to the freelist — the file
+    /// keeps them, which is why a 1.4 GB snapshot load used to leave a second copy
+    /// behind. [`purge_free_pages`] is what actually releases them, and the
+    /// checkpoint then shrinks the write-ahead log, which otherwise keeps its peak
+    /// size. Both are best-effort: a concurrent read can make them back off with
+    /// `SQLITE_BUSY`, and the next import (or the next start) retries.
+    pub fn finish_import(&mut self) -> Result<()> {
+        self.conn
+            .execute_batch(&format!("DROP TABLE IF EXISTS {IMPORT};"))
+            .context("dropping the staging table")?;
+        if let Err(e) = self.reclaim_after_import() {
+            log::warn!("reclaiming space after import failed: {e:#}");
+        }
+        Ok(())
+    }
+
+    /// Release the freed staging pages, then shrink the write-ahead log.
+    fn reclaim_after_import(&self) -> Result<()> {
+        purge_free_pages(&self.conn)?;
+        self.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        Ok(())
+    }
+
+    /// Insert a batch of parsed rows into `table`, either the act table or the
+    /// staging table.
+    ///
+    /// `fts` mirrors the rows into the full-text index, which only the act table
+    /// needs: the staging table is indexed once, by [`merge_import`], for exactly
+    /// the rows it copies. Uses plain INSERT, not upsert — an external-content FTS
+    /// index cannot be updated in place without the previous column values, which
+    /// this feed does not retain.
+    fn insert_into(&mut self, table: &str, rows: &[Row], fts: bool) -> Result<()> {
         if rows.is_empty() {
             return Ok(());
         }
-        let cols = self.act_columns()?;
+        let cols = self.columns_of(table)?;
         let placeholders = (1..=cols.len())
             .map(|i| format!("?{i}"))
             .collect::<Vec<_>>()
@@ -548,12 +692,16 @@ impl Store {
         let tx = self.conn.transaction()?;
         {
             let mut ins = tx.prepare(&format!(
-                "INSERT INTO {ACTS} ({quoted}) VALUES ({placeholders})"
+                "INSERT INTO {table} ({quoted}) VALUES ({placeholders})"
             ))?;
-            let mut fts = tx.prepare(&format!(
-                "INSERT INTO {FTS} (rowid, NUMERO_IDENTIFICACAO, NUMERO_OFICIAL, SUMULA, CABECALHO, body)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
-            ))?;
+            let mut fts_stmt = if fts {
+                Some(tx.prepare(&format!(
+                    "INSERT INTO {FTS} (rowid, NUMERO_IDENTIFICACAO, NUMERO_OFICIAL, SUMULA, CABECALHO, body)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
+                ))?)
+            } else {
+                None
+            };
 
             for row in rows {
                 if row.values.len() != cols.len() {
@@ -578,21 +726,34 @@ impl Store {
 
                 // Mirror the searchable text into the index. Missing columns are
                 // simply NULL, which FTS treats as absent.
-                let at = |name: &str| -> Option<&String> {
-                    cols.iter().position(|c| c == name).and_then(|i| row.values[i].as_ref())
-                };
-                fts.execute(params![
-                    row.id(),
-                    at("NUMERO_IDENTIFICACAO"),
-                    at("NUMERO_OFICIAL"),
-                    at("SUMULA"),
-                    at("CABECALHO"),
-                    at("body"),
-                ])?;
+                if let Some(fts) = fts_stmt.as_mut() {
+                    let at = |name: &str| -> Option<&String> {
+                        cols.iter().position(|c| c == name).and_then(|i| row.values[i].as_ref())
+                    };
+                    fts.execute(params![
+                        row.id(),
+                        at("NUMERO_IDENTIFICACAO"),
+                        at("NUMERO_OFICIAL"),
+                        at("SUMULA"),
+                        at("CABECALHO"),
+                        at("body"),
+                    ])?;
+                }
             }
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Insert a batch of parsed rows into the act table and its index.
+    pub fn insert_rows(&mut self, rows: &[Row]) -> Result<()> {
+        self.insert_into(ACTS, rows, true)
+    }
+
+    /// Insert a batch of parsed rows into the staging table. The full-text index
+    /// is left alone here; [`merge_import`] indexes exactly the rows it copies.
+    pub fn stage_rows(&mut self, rows: &[Row]) -> Result<()> {
+        self.insert_into(IMPORT, rows, false)
     }
 
     /// Read a column out of a row as text, whatever storage class it holds.
@@ -612,14 +773,18 @@ impl Store {
         })
     }
 
-    fn act_columns(&self) -> Result<Vec<String>> {
-        let stmt = self.conn.prepare(&format!("SELECT * FROM {ACTS} LIMIT 0"))?;
+    fn columns_of(&self, table: &str) -> Result<Vec<String>> {
+        let stmt = self.conn.prepare(&format!("SELECT * FROM {table} LIMIT 0"))?;
         let cols = stmt
             .column_names()
             .iter()
             .map(|s| s.to_string())
             .collect();
         Ok(cols)
+    }
+
+    fn act_columns(&self) -> Result<Vec<String>> {
+        self.columns_of(ACTS)
     }
 
     /// Replace a small lookup table (ORGAO, TIPO_ATO, ...) wholesale.
@@ -706,14 +871,22 @@ impl Store {
             // The SQL for this one condition. Each value is bound separately, so
             // neither the column nor the values reach the SQL text.
             let term = match f.op {
-                // "is one of", the SQL form of a multi-value equality.
+                // "is one of", the SQL form of a multi-value equality. The ORs
+                // must be parenthesised: this term is joined to the next clause
+                // (including the `ID > floor` boundary) with AND, and AND binds
+                // tighter than OR — without the parentheses only the last value
+                // would respect the floor while the rest matched the whole table.
                 Op::Eq => {
                     let mut any = Vec::new();
                     for v in &values {
                         any.push(format!("a.\"{}\" = ?{}", f.column, binds.len() + 1));
                         binds.push(Box::new(v.to_string()));
                     }
-                    any.join(" OR ")
+                    if any.len() == 1 {
+                        any[0].clone()
+                    } else {
+                        format!("({})", any.join(" OR "))
+                    }
                 }
                 // "is none of": keeps rows whose column holds none of the values.
                 Op::Ne => {
@@ -832,7 +1005,7 @@ impl Store {
 
         let sql = format!(
             "SELECT a.\"ID\", a.\"NUMERO_IDENTIFICACAO\", a.\"NUMERO_OFICIAL\", a.\"ANO_PUBLICACAO\",
-                    a.\"DATA_PUBLICACAO\", a.\"TIPO_ATO_ID\", a.\"ORGAO_ID__ORIGEM\",
+                    a.\"DATA_PUBLICACAO\", a.\"DATA_CRIACAO\", a.\"TIPO_ATO_ID\", a.\"ORGAO_ID__ORIGEM\",
                     a.\"SITUACAO_ACAO_ID\", a.\"SUMULA\", {snippet}
              FROM {from}{where_sql} ORDER BY {order} LIMIT ?{} OFFSET ?{}",
             binds.len() + 1,
@@ -852,16 +1025,49 @@ impl Store {
                     numero_oficial: r.get(2)?,
                     ano_publicacao: r.get(3)?,
                     data_publicacao: r.get(4)?,
-                    tipo: r.get(5)?,
-                    orgao: r.get(6)?,
-                    situacao: r.get(7)?,
-                    sumula: r.get(8)?,
-                    snippet: r.get(9)?,
+                    data_criacao: r.get(5)?,
+                    tipo: r.get(6)?,
+                    orgao: r.get(7)?,
+                    situacao: r.get(8)?,
+                    sumula: r.get(9)?,
+                    snippet: r.get(10)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
         Ok(SearchResult { rows, total })
+    }
+
+    /// One act, in the same shape [`Store::search`] returns, for a single id.
+    ///
+    /// `ID` is not a filterable column — that list is UI-facing — so a search
+    /// cannot pick out exactly one act; the on-demand send needs the row itself.
+    /// The projection mirrors `search`'s so an act read here matches what a
+    /// rule's matches carry.
+    pub fn act_row(&self, id: i64) -> Result<Option<ActRow>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT a.\"ID\", a.\"NUMERO_IDENTIFICACAO\", a.\"NUMERO_OFICIAL\", a.\"ANO_PUBLICACAO\",
+                    a.\"DATA_PUBLICACAO\", a.\"DATA_CRIACAO\", a.\"TIPO_ATO_ID\", a.\"ORGAO_ID__ORIGEM\",
+                    a.\"SITUACAO_ACAO_ID\", a.\"SUMULA\"
+             FROM {ACTS} a WHERE a.\"ID\" = ?1"
+        ))?;
+        let mut rows = stmt.query(params![id])?;
+        let Some(r) = rows.next()? else {
+            return Ok(None);
+        };
+        Ok(Some(ActRow {
+            id: r.get(0)?,
+            numero_identificacao: r.get(1)?,
+            numero_oficial: r.get(2)?,
+            ano_publicacao: r.get(3)?,
+            data_publicacao: r.get(4)?,
+            data_criacao: r.get(5)?,
+            tipo: r.get(6)?,
+            orgao: r.get(7)?,
+            situacao: r.get(8)?,
+            sumula: r.get(9)?,
+            snippet: None,
+        }))
     }
 
     /// Distinct values with counts, for a filter dropdown.
@@ -941,12 +1147,14 @@ impl Store {
 
         // The dimension CSV is small and loaded wholesale; `NOME` is its label
         // column in this feed. A missing table (not ingested yet) is not an error.
+        // `key -> NOME` labels the values offered below.
         let exists: bool = self.conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
             params![rel.table],
             |r| r.get(0),
         )?;
         let safe = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        let mut names: Vec<(String, String)> = Vec::new();
         if exists && safe(&rel.table) && safe(&rel.key) {
             let sql = format!(
                 "SELECT \"{key}\", \"NOME\" FROM \"{table}\" WHERE \"{key}\" IS NOT NULL
@@ -955,38 +1163,64 @@ impl Store {
                 table = rel.table
             );
             let mut stmt = self.conn.prepare(&sql)?;
-            let rows = stmt
+            names = stmt
                 .query_map(params![limit.max(1)], |r| {
                     let value: String = r.get(0)?;
                     let nome: Option<String> = r.get(1)?;
-                    Ok(ColumnValue {
-                        label: nome.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| value.clone()),
+                    Ok((
                         value,
-                    })
+                        nome.unwrap_or_default(),
+                    ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            if !rows.is_empty() {
-                return Ok(Some(rows));
-            }
         }
 
-        // No dimension loaded: fall back to what the acts themselves hold, which is
-        // the name rather than the key for the columns this feed denormalises. An
-        // empty result is reported as "no list", so the UI offers a text field
-        // rather than a select with nothing in it.
+        // The offered value must be exactly what the search will bind. The schema
+        // declares this a foreign key — `TIPO_ATO.ID`, a smallint — but this feed
+        // stores the *name* in the act row (see the `denormalised` note above), so
+        // the acts' own values are the vocabulary; the dimension only supplies
+        // labels. Offering the key here would produce rules that match nothing.
+        //
+        // An empty acts column (no data loaded yet) falls back to the dimension
+        // keys, which is still a usable list and matches once acts arrive holding
+        // those values.
         let facets = self.facet(column, limit)?;
-        if facets.is_empty() {
-            return Ok(None);
+        let label_for = |value: &str| -> Option<&str> {
+            names
+                .iter()
+                .find(|(k, n)| !n.is_empty() && (k == value || n == value))
+                .map(|(_, n)| n.as_str())
+        };
+
+        if !facets.is_empty() {
+            return Ok(Some(
+                facets
+                    .into_iter()
+                    .map(|f| ColumnValue {
+                        label: label_for(&f.value)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("{} ({})", f.value, f.count)),
+                        value: f.value,
+                    })
+                    .collect(),
+            ));
         }
-        Ok(Some(
-            facets
-                .into_iter()
-                .map(|f| ColumnValue {
-                    label: format!("{} ({})", f.value, f.count),
-                    value: f.value,
-                })
-                .collect(),
-        ))
+
+        if !names.is_empty() {
+            return Ok(Some(
+                names
+                    .into_iter()
+                    .map(|(value, nome)| ColumnValue {
+                        label: if nome.trim().is_empty() { value.clone() } else { nome },
+                        value,
+                    })
+                    .collect(),
+            ));
+        }
+
+        // Nothing to offer: report "no list" so the UI shows a text field rather
+        // than a select with nothing in it.
+        Ok(None)
     }
 
     /// Every stored field of one act, labelled from the schema.
@@ -1571,6 +1805,33 @@ mod tests {
     }
 
     #[test]
+    fn min_id_bounds_every_value_of_a_multi_value_filter() {
+        // Reproduces a precedence bug: a multi-value `eq` was emitted as a bare
+        // `"col" = ? OR "col" = ?`, so when the floor was joined on with AND only
+        // the *last* value honoured it — the earlier ones matched the whole table.
+        // Ids 1 (`DECRETO`) and 2 (`LEI COMPLEMENTAR`) are both matched, but only
+        // id 2 is above the floor; if the first OR term escaped the floor the
+        // total would be 2 instead of 1.
+        let s = seeded();
+        let q = |min_id| ActQuery {
+            filters: vec![Filter {
+                column: "TIPO_ATO_ID".into(),
+                op: Op::Eq,
+                // `all_values` puts `values` first, so DECRETO leads the OR.
+                value: "LEI COMPLEMENTAR".into(),
+                values: vec!["DECRETO".into()],
+                ..Default::default()
+            }],
+            min_id,
+            limit: 10,
+            ..Default::default()
+        };
+        assert_eq!(s.search(&q(None)).unwrap().total, 2);
+        assert_eq!(s.search(&q(Some(1))).unwrap().total, 1, "the floor must bound every value");
+        assert_eq!(s.search(&q(Some(1))).unwrap().rows[0].id, 2);
+    }
+
+    #[test]
     fn min_id_composes_with_text_and_can_stand_alone() {
         let s = seeded();
         // "conselho" matches id 1, which is not above the floor; the text hit and
@@ -1659,6 +1920,34 @@ mod tests {
     }
 
     #[test]
+    fn a_related_column_offers_the_values_the_acts_actually_hold() {
+        // The feed declares TIPO_ATO_ID as `TIPO_ATO.ID` (a smallint) but stores
+        // the type's *name* in the act row. Offering the key would produce a rule
+        // that matches nothing, so the vocabulary must come from the acts and the
+        // dimension must only label it.
+        let mut s = seeded();
+        s.replace_dimension(
+            "TIPO_ATO",
+            &["ID".into(), "NOME".into()],
+            &[
+                vec![Some("50".into()), Some("ACORDÃO".into())],
+                vec![Some("3".into()), Some("LEI COMPLEMENTAR".into())],
+                vec![Some("1".into()), Some("DECRETO".into())],
+            ],
+        )
+        .unwrap();
+
+        let values = s.column_values(&test_schema(), "TIPO_ATO_ID", 200).unwrap().unwrap();
+        let offered: Vec<&str> = values.iter().map(|v| v.value.as_str()).collect();
+        assert!(offered.contains(&"DECRETO"), "value must be what the act holds: {offered:?}");
+        assert!(offered.contains(&"LEI COMPLEMENTAR"));
+        assert!(!offered.contains(&"50"), "the dimension key must not be offered: {offered:?}");
+        // The label stays the dimension's NOME.
+        let decreto = values.iter().find(|v| v.value == "DECRETO").unwrap();
+        assert_eq!(decreto.label, "DECRETO");
+    }
+
+    #[test]
     fn detail_labels_fields_and_resolves_dimensions() {
         let mut s = seeded();
         // Load the ORGAO dimension, then a detail lookup should resolve it.
@@ -1682,42 +1971,177 @@ mod tests {
     }
 
     #[test]
-    fn clear_acts_empties_data_and_the_index() {
-        let mut s = seeded();
+    fn act_row_reads_one_act_by_id() {
+        let s = seeded();
+        let r = s.act_row(1).unwrap().unwrap();
+        assert_eq!(r.id, 1);
+        assert_eq!(r.numero_identificacao.as_deref(), Some("DOC-1"));
+        assert_eq!(r.numero_oficial.as_deref(), Some("683"));
+        assert_eq!(r.tipo.as_deref(), Some("DECRETO"));
+        assert_eq!(r.situacao.as_deref(), Some("Revogado"));
+        assert!(r.snippet.is_none(), "no text query, so no excerpt");
+        assert!(s.act_row(999).unwrap().is_none(), "a missing id is None");
+    }
+
+    #[test]
+    fn staging_import_migrates_only_rows_above_the_stored_maximum() {
+        let mut s = seeded(); // ids 1 and 2
+        s.begin_import().unwrap();
+        // The republished file carries the acts we already hold (1, 2) plus two
+        // new ones. Only the new ids may reach the act table.
+        s.stage_rows(&[
+            row(1, &[("NUMERO_IDENTIFICACAO", "DOC-1")]),
+            row(2, &[("NUMERO_IDENTIFICACAO", "DOC-2")]),
+            row(3, &[("NUMERO_IDENTIFICACAO", "DOC-3"), ("SUMULA", "NOVO ATO TRES")]),
+            row(4, &[("NUMERO_IDENTIFICACAO", "DOC-4")]),
+        ])
+        .unwrap();
+        assert_eq!(s.merge_import().unwrap(), 2, "only ids 3 and 4 are new");
+        s.finish_import().unwrap();
+
+        assert_eq!(s.act_count().unwrap(), 4);
+        assert_eq!(s.max_act_id().unwrap(), Some(4));
+        assert!(s.act_detail(&test_schema(), 3).unwrap().is_some());
+    }
+
+    #[test]
+    fn staging_import_into_an_empty_table_migrates_everything() {
+        let mut s = Store::open_in_memory().unwrap();
+        s.ensure_act_tables(&test_schema()).unwrap();
+        s.begin_import().unwrap();
+        s.stage_rows(&[
+            row(10, &[("NUMERO_IDENTIFICACAO", "DOC-10")]),
+            row(11, &[]),
+        ])
+        .unwrap();
+        assert_eq!(s.merge_import().unwrap(), 2, "no floor: every row is new");
+        s.finish_import().unwrap();
         assert_eq!(s.act_count().unwrap(), 2);
-        s.clear_acts().unwrap();
-        assert_eq!(s.act_count().unwrap(), 0);
-        // A stale index would still match; it must not.
-        let r = s
+    }
+
+    #[test]
+    fn a_migrated_row_is_searchable_through_the_index() {
+        // The merge must populate the full-text index for the rows it copies.
+        let mut s = seeded();
+        s.begin_import().unwrap();
+        s.stage_rows(&[
+            row(3, &[("SUMULA", "LICITACAO PARA COMPRA DE VIATURAS")]),
+            row(4, &[("SUMULA", "NOMEACAO DE SERVIDORES")]),
+        ])
+        .unwrap();
+        s.merge_import().unwrap();
+        s.finish_import().unwrap();
+
+        let hit = s
             .search(&ActQuery {
-                text: Some("conselho".into()),
+                text: Some("viaturas".into()),
                 limit: 10,
                 ..Default::default()
             })
             .unwrap();
-        assert_eq!(r.total, 0, "the full-text index must be emptied too");
+        assert_eq!(hit.total, 1);
+        assert_eq!(hit.rows[0].id, 3);
+    }
+
+    #[test]
+    fn begin_import_leaves_the_act_table_alone() {
+        let mut s = seeded();
+        s.begin_import().unwrap();
+        assert_eq!(s.act_count().unwrap(), 2, "staging is separate from the act table");
+        assert_eq!(s.merge_import().unwrap(), 0, "nothing staged yet");
+        s.finish_import().unwrap();
+    }
+
+    #[test]
+    fn the_staging_table_is_gone_after_the_merge() {
+        let mut s = seeded();
+        s.begin_import().unwrap();
+        s.stage_rows(&[row(3, &[("NUMERO_IDENTIFICACAO", "DOC-3")])])
+            .unwrap();
+        assert_eq!(s.merge_import().unwrap(), 1);
+        s.finish_import().unwrap();
+
+        let left: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'acts_import'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0, "the staging table must not survive the import");
+        assert_eq!(s.act_count().unwrap(), 3, "its rows are in the act table");
+    }
+
+    #[test]
+    fn finish_import_returns_the_staging_space_to_the_file() {
+        // This can only be seen on a real file — an in-memory database has no file
+        // to shrink. It reproduces the bug where `PRAGMA incremental_vacuum` was
+        // executed once (freeing a single page) instead of drained, so a dropped
+        // staging table stayed in the file as a freelist.
+        let dir = std::env::temp_dir().join(format!("legisladoc-vacuum-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("size.sqlite");
+
+        let mut s = Store::open(&path).unwrap();
+        s.ensure_act_tables(&test_schema()).unwrap();
+        // One act with a high id, so every staged row sits under the floor and the
+        // merge copies nothing — this isolates the reclaim.
+        s.insert_rows(&[row(1_000_000, &[("NUMERO_IDENTIFICACAO", "KEEP")])])
+            .unwrap();
+
+        let body = "x".repeat(4000);
+        let staged: Vec<Row> = (1..=3_000)
+            .map(|id| row(id, &[("NUMERO_IDENTIFICACAO", "OLD"), ("body", body.as_str())]))
+            .collect();
+
+        s.begin_import().unwrap();
+        s.stage_rows(&staged).unwrap();
+        s.conn
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        let peak = std::fs::metadata(&path).unwrap().len();
+
+        assert_eq!(s.merge_import().unwrap(), 0, "no staged id is above the floor");
+        s.finish_import().unwrap();
+        let after = std::fs::metadata(&path).unwrap().len();
+
+        assert!(
+            after < peak,
+            "the staging space must be released: peak {peak} B -> after {after} B"
+        );
+        assert_eq!(s.act_count().unwrap(), 1, "the act table is untouched");
+
+        drop(s);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn snapshot_state_round_trips() {
-        let mut s = Store::open_in_memory().unwrap();
-        let sc = test_schema();
-        s.ensure_act_tables(&sc).unwrap();
+        let s = Store::open_in_memory().unwrap();
         let f = "2026-10-08_ATO.csv";
-        s.upsert_snapshot_meta(f, 1424486256, Some("\"abc\""), Some("Thu, 08 Oct 2026 08:27:57 GMT"))
-            .unwrap();
-        s.commit_snapshot_progress(f, 1424486256, Some(393577), 393577).unwrap();
+        assert!(s.snapshot_state(f).unwrap().is_none(), "nothing recorded yet");
 
+        s.record_snapshot(
+            f,
+            1424486256,
+            Some("\"abc\""),
+            Some("Thu, 08 Oct 2026 08:27:57 GMT"),
+            Some(393577),
+            393577,
+        )
+        .unwrap();
         let st = s.snapshot_state(f).unwrap().unwrap();
-        assert_eq!(st.offset, 1424486256);
+        assert_eq!(st.size, 1424486256);
         assert_eq!(st.etag.as_deref(), Some("\"abc\""));
-        assert_eq!(st.last_id, Some(393577));
-        assert_eq!(st.row_count, 393577);
 
-        // Re-recording metadata must not move the watermark backwards.
-        s.upsert_snapshot_meta(f, 1424987102, Some("\"def\""), None).unwrap();
+        // Re-recording a later revision replaces the validators.
+        s.record_snapshot(f, 1424987102, Some("\"def\""), None, Some(400000), 400000)
+            .unwrap();
         let st = s.snapshot_state(f).unwrap().unwrap();
-        assert_eq!(st.offset, 1424486256, "offset only moves on commit");
+        assert_eq!(st.size, 1424987102);
+        assert_eq!(st.etag.as_deref(), Some("\"def\""));
     }
 
     #[test]

@@ -21,6 +21,9 @@ pub struct FileRow {
     pub mtime: Option<String>,
     /// True when mtime falls inside the trailing 30-day window.
     pub recent: bool,
+    /// RFC 3339 of the last ingest of this file, or `None` when it has not been
+    /// processed (a file this app does not read, or one not yet synced).
+    pub synced_at: Option<String>,
 }
 
 /// Aggregate counters driving the header and the stat tiles.
@@ -86,6 +89,13 @@ fn init_schema(conn: &Connection) -> Result<()> {
             updated       INTEGER NOT NULL,
             removed       INTEGER NOT NULL,
             error         TEXT
+        );
+
+        -- When each Base_de_Dados file was last ingested, for the explorer's
+        -- "sincronizado em" badge. Keyed by base file name.
+        CREATE TABLE IF NOT EXISTS processed_files (
+            file_name TEXT PRIMARY KEY,
+            synced_at TEXT NOT NULL
         );
         "#,
     )
@@ -207,6 +217,9 @@ fn row_from(r: &rusqlite::Row<'_>) -> rusqlite::Result<FileRow> {
         size: r.get(1)?,
         mtime,
         recent,
+        // Filled in by `query_files` from `processed_files`; a `row_from` alone
+        // has no connection to look it up with.
+        synced_at: None,
     })
 }
 
@@ -245,12 +258,20 @@ pub fn query_files(
          LIMIT ?3 OFFSET ?4"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt
+    let mut rows = stmt
         .query_map(
             params![has_q as i64, like, limit, offset],
             |r| Ok(row_from(r)?),
         )?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // Attach the "sincronizado em" time. Matching by base name (rather than a
+    // SQL join) holds whether the listing path is a bare name or carries a
+    // directory prefix, since `processed_files` is keyed by base name.
+    let processed = processed_index(conn)?;
+    for row in &mut rows {
+        row.synced_at = processed.get(basename(&row.path)).cloned();
+    }
 
     let total: i64 = conn.query_row(
         "SELECT COUNT(*) FROM files WHERE (?1 = 0 OR path LIKE ?2 ESCAPE '\\')",
@@ -259,6 +280,48 @@ pub fn query_files(
     )?;
 
     Ok((rows, total))
+}
+
+/// The final path component — the key `processed_files` and `snapshots` use.
+fn basename(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+/// `file_name -> synced_at` for every file that has been ingested.
+fn processed_index(conn: &Connection) -> Result<std::collections::HashMap<String, String>> {
+    let mut stmt = conn.prepare("SELECT file_name, synced_at FROM processed_files")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut map = std::collections::HashMap::new();
+    for row in rows {
+        let (name, at) = row?;
+        map.insert(name, at);
+    }
+    Ok(map)
+}
+
+/// Record (or refresh) when each ingested file was processed.
+///
+/// The explorer badges any listed file named here. `names` are base file names,
+/// the shape `snapshots` already uses.
+pub fn record_processed(conn: &Connection, names: &[String]) -> Result<()> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
+    {
+        let mut up = tx.prepare(
+            "INSERT INTO processed_files (file_name, synced_at) VALUES (?1, ?2)
+             ON CONFLICT(file_name) DO UPDATE SET synced_at = excluded.synced_at",
+        )?;
+        for name in names {
+            up.execute(params![name, now])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 fn escape_like(s: &str) -> String {
@@ -536,5 +599,58 @@ mod tests {
         apply_listing(&mut c, "s", 0, &[f("old.csv", 1, Some(old))], None).unwrap();
         let (rows, _) = query_files(&c, "old.csv", 10, 0, "mtime", false).unwrap();
         assert!(!rows[0].recent);
+    }
+
+    #[test]
+    fn processed_files_are_recorded_and_refreshed() {
+        let c = conn();
+        record_processed(&c, &[]).unwrap(); // no-op, must not fail
+        record_processed(&c, &["2026-10-08_Legisladoc_-_ATO_-_Base_de_Dados.csv".to_string()])
+            .unwrap();
+
+        let first: String = c
+            .query_row(
+                "SELECT synced_at FROM processed_files WHERE file_name = ?1",
+                params!["2026-10-08_Legisladoc_-_ATO_-_Base_de_Dados.csv"],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // Re-recording the same name replaces its timestamp, never duplicates it.
+        record_processed(&c, &["2026-10-08_Legisladoc_-_ATO_-_Base_de_Dados.csv".to_string()])
+            .unwrap();
+        let count: i64 = c
+            .query_row("SELECT COUNT(*) FROM processed_files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let again: String = c
+            .query_row("SELECT synced_at FROM processed_files LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert!(again >= first, "the timestamp only moves forward");
+    }
+
+    #[test]
+    fn a_file_row_carries_its_sync_time_by_base_name() {
+        let mut c = conn();
+        apply_listing(
+            &mut c,
+            "s",
+            0,
+            &[
+                f("curitiba/2026-10-08_Legisladoc_-_ATO_-_Base_de_Dados.csv", 1, None),
+                f("2026-10-08_Legisladoc_-_Info.xml", 1, None),
+            ],
+            None,
+        )
+        .unwrap();
+        // Recorded by base name, matched even though the row path has a prefix.
+        record_processed(&c, &["2026-10-08_Legisladoc_-_ATO_-_Base_de_Dados.csv".to_string()])
+            .unwrap();
+
+        let (rows, _) = query_files(&c, "", 10, 0, "path", true).unwrap();
+        let ato = rows.iter().find(|r| r.path.ends_with("ATO_-_Base_de_Dados.csv")).unwrap();
+        assert!(ato.synced_at.is_some(), "the ingested file carries a sync time");
+        let info = rows.iter().find(|r| r.path.ends_with("Info.xml")).unwrap();
+        assert!(info.synced_at.is_none(), "an unread file carries none");
     }
 }

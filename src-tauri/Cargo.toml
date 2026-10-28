@@ -1,8 +1,9 @@
 [package]
-name = "legisladoc-browser"
+name = "legisladoc-sync"
 version = "0.1.0"
 description = "Browse and search the Legisladoc rsync feed with a local index"
 authors = ["Erick"]
+license = "MIT"
 edition = "2021"
 
 [lib]

@@ -2,8 +2,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   AppSnapshot,
+  SyncAlert,
   SyncReport,
   compactNumber,
+  formatActDate,
   formatBytes,
   formatDate,
   getState,
@@ -21,6 +23,41 @@ import logo from "./cwb-logo.svg";
 const INTERVAL_CHOICES = [15, 30, 60, 180, 720];
 
 type Page = "atos" | "explorador" | "email";
+
+/**
+ * O alerta de uma atualização manual: quais regras casaram e alguns atos.
+ *
+ * Uma regra pode ter centenas de resultados, então a lista mostra uma amostra e
+ * diz quantos ficaram de fora — o alerta é um aviso, não um relatório.
+ */
+function AlertBody({ alert }: { alert: SyncAlert }) {
+  return (
+    <ul className="alert-rules">
+      {alert.rules.map((r) => (
+        <li key={r.rule_id}>
+          <span className="alert-rule-name">{r.rule_name}</span>
+          <span className="muted">
+            {r.matched} ato(s)
+            {r.matched > r.samples.length
+              ? ` · ${r.samples.length} listado(s)`
+              : ""}
+          </span>
+          <ul className="alert-acts">
+            {r.samples.map((a) => (
+              <li key={a.id}>
+                {a.numero_identificacao ?? `#${a.id}`}
+                {a.tipo ? ` · ${a.tipo}` : ""}
+                {a.data_publicacao
+                  ? ` · ${formatActDate(a.data_publicacao)}`
+                  : ""}
+              </li>
+            ))}
+          </ul>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 export default function App() {
   const [page, setPage] = useState<Page>("atos");
@@ -56,6 +93,12 @@ export default function App() {
         setSnapshot((s) => (s ? { ...s, syncing: true } : s));
       }),
       listen<Progress>("ingest-progress", (e) => setProgress(e.payload)),
+      // Uma atualização manual não envia e-mail: o resultado aparece aqui. O
+      // evento é emitido depois de `sync-complete`, então o snapshot buscado
+      // por ele pode ainda não trazer o alerta — daí os dois caminhos.
+      listen<SyncAlert>("sync-matches", (e) => {
+        setSnapshot((s) => (s ? { ...s, alert: e.payload } : s));
+      }),
     ];
     return () => {
       unlisten.forEach((p) => p.then((f) => f()));
@@ -82,6 +125,9 @@ export default function App() {
 
   const onSync = async () => {
     setError(null);
+    // Uma atualização manual não envia e-mail; o resultado entra no alerta.
+    // Limpar antes evita que o alerta anterior pareça ser desta execução.
+    setAlert(null);
     setSnapshot((s) => (s ? { ...s, syncing: true } : s));
     try {
       await syncNow();
@@ -106,6 +152,9 @@ export default function App() {
   const summary = snapshot?.summary;
   const lastSync = snapshot?.last_sync;
   const report = snapshot?.act_report;
+  const alert = snapshot?.alert ?? null;
+  const setAlert = (a: SyncAlert | null) =>
+    setSnapshot((s) => (s ? { ...s, alert: a } : s));
   const syncing = snapshot?.syncing ?? false;
 
   const status = useMemo(() => {
@@ -115,9 +164,7 @@ export default function App() {
       const delta =
         report.action === "unchanged"
           ? "sem alterações"
-          : report.action === "appended"
-          ? `+${report.rows_added.toLocaleString("pt-BR")} atos novos`
-          : `${report.total_rows.toLocaleString("pt-BR")} atos recarregados`;
+          : `+${report.rows_added.toLocaleString("pt-BR")} atos novos`;
       return {
         tone: "ok" as const,
         text: `Atualizado ${relativeTime(lastSync?.at ?? null)} · ${delta}`,
@@ -275,7 +322,7 @@ export default function App() {
               label="Atos publicados"
               value={report ? report.total_rows.toLocaleString("pt-BR") : "—"}
               note={
-                report?.action === "appended" && report.rows_added > 0 ? (
+                report && report.rows_added > 0 ? (
                   <span className="delta-good">
                     +{report.rows_added.toLocaleString("pt-BR")} nesta atualização
                   </span>
@@ -332,6 +379,18 @@ export default function App() {
               <Message kind="danger" title="Falha na atualização.">
                 {error ?? lastSync?.error} — os dados exibidos são da última
                 cópia válida.
+              </Message>
+            </div>
+          )}
+
+          {alert && alert.total_matched > 0 && (
+            <div className="app-message">
+              <Message
+                kind="info"
+                title={`${compactNumber(alert.total_matched)} ato(s) novo(s) nesta atualização`}
+                onClose={() => setAlert(null)}
+              >
+                <AlertBody alert={alert} />
               </Message>
             </div>
           )}

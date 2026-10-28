@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
+use crate::schema::Schema;
 use crate::AppState;
 
 // ---------------------------------------------------------------- constants
@@ -245,6 +246,77 @@ pub struct EmailStatus {
     pub watermark_id: i64,
     pub enabled_rules: i64,
     pub act_count: i64,
+}
+
+/// A manual sync's matches, for the in-app alert area.
+///
+/// Deliberately not an `EmailLogEntry`: that type is *history*, and a manual
+/// sync must not write history — nothing was sent. It also cannot carry the
+/// sample acts, since `run` drops `act_ids` on the way out and the log never
+/// stored the fields the UI renders.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncAlert {
+    /// The feed file the acts came from, so the alert can name the day.
+    pub snapshot: String,
+    pub max_id: i64,
+    pub total_matched: i64,
+    pub rules: Vec<SyncAlertRule>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncAlertRule {
+    pub rule_id: i64,
+    pub rule_name: String,
+    /// The full match count, which may exceed `samples.len()`.
+    pub matched: i64,
+    pub samples: Vec<SyncAlertAct>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncAlertAct {
+    pub id: i64,
+    pub numero_identificacao: Option<String>,
+    pub data_publicacao: Option<String>,
+    pub tipo: Option<String>,
+}
+
+/// Acts listed per rule in the alert. The alert is a nudge, not a report; a
+/// rule matching hundreds says so via `matched` rather than enumerating them.
+pub const MAX_ALERT_SAMPLES: usize = 5;
+
+/// Project a run's matches into the alert payload. Pure, so the sampling and
+/// the total are testable without a database or an `AppHandle`.
+pub fn build_alert(matches: &[RuleMatches], snapshot: &str, max_id: i64) -> SyncAlert {
+    let mut total_matched = 0;
+    let mut rules = Vec::new();
+    for m in matches {
+        if m.total <= 0 {
+            continue; // nothing matched; not worth a line in the alert
+        }
+        total_matched += m.total;
+        rules.push(SyncAlertRule {
+            rule_id: m.rule.id,
+            rule_name: m.rule.name.clone(),
+            matched: m.total,
+            samples: m
+                .rows
+                .iter()
+                .take(MAX_ALERT_SAMPLES)
+                .map(|r| SyncAlertAct {
+                    id: r.id,
+                    numero_identificacao: r.numero_identificacao.clone(),
+                    data_publicacao: r.data_publicacao.clone(),
+                    tipo: r.tipo.clone(),
+                })
+                .collect(),
+        });
+    }
+    SyncAlert {
+        snapshot: snapshot.to_string(),
+        max_id,
+        total_matched,
+        rules,
+    }
 }
 
 // ---------------------------------------------------------------- crypto
@@ -484,23 +556,37 @@ pub fn parse_recipients(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Map a `email_rules` row (id, name, enabled, text, filters_json, recipients).
+fn rule_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EmailRule> {
+    let filters_json: String = r.get(4)?;
+    let recipients: String = r.get(5)?;
+    Ok(EmailRule {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        enabled: r.get::<_, i64>(2)? != 0,
+        text: r.get(3)?,
+        filters: serde_json::from_str(&filters_json).unwrap_or_default(),
+        recipients: parse_recipients(&recipients),
+    })
+}
+
 pub fn list_rules(conn: &Connection) -> Result<Vec<EmailRule>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, enabled, text, filters_json, recipients FROM email_rules ORDER BY id",
     )?;
-    let rows = stmt.query_map([], |r| {
-        let filters_json: String = r.get(4)?;
-        let recipients: String = r.get(5)?;
-        Ok(EmailRule {
-            id: r.get(0)?,
-            name: r.get(1)?,
-            enabled: r.get::<_, i64>(2)? != 0,
-            text: r.get(3)?,
-            filters: serde_json::from_str(&filters_json).unwrap_or_default(),
-            recipients: parse_recipients(&recipients),
-        })
-    })?;
+    let rows = stmt.query_map([], rule_from_row)?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// One rule by id, for the simulation panel's pager.
+pub fn get_rule(conn: &Connection, id: i64) -> Result<EmailRule> {
+    conn.query_row(
+        "SELECT id, name, enabled, text, filters_json, recipients FROM email_rules WHERE id = ?1",
+        params![id],
+        rule_from_row,
+    )
+    .optional()?
+    .ok_or_else(|| anyhow::anyhow!("regra {id} não encontrada"))
 }
 
 pub fn save_rule(conn: &Connection, input: &EmailRuleInput) -> Result<EmailRule> {
@@ -551,6 +637,104 @@ pub fn delete_rule(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Rewrite saved rule filters that name a foreign-key column by its dimension
+/// *key* into the value the acts actually carry.
+///
+/// The feed's `Info.xml` declares e.g. `TIPO_ATO_ID` as `TIPO_ATO.ID` (a
+/// `smallint`), but the snapshot stores the type's **name** in that column
+/// (`"ACORDÃO"`, not `"50"`). A rule saved while the schema was taken literally
+/// holds the key and silently matches nothing; this maps it to the name. Both the
+/// key and the name map to the name, so a second pass is a no-op.
+///
+/// Runs after the dimension tables are (re)loaded, which is the point at which
+/// the mapping is known to be current. Returns how many rules were rewritten.
+pub fn normalize_related_filters(conn: &Connection, schema: &Schema) -> Result<usize> {
+    use std::collections::HashMap;
+
+    let Some(ato) = schema.table("ATO") else {
+        return Ok(0);
+    };
+    let safe = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+
+    // column -> (stored token -> canonical name).
+    let mut maps: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for col in &ato.columns {
+        let Some(rel) = col.related.as_ref() else {
+            continue;
+        };
+        if !safe(&rel.table) || !safe(&rel.key) {
+            continue;
+        }
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+            params![rel.table],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            continue;
+        }
+        let mut stmt = conn.prepare(&format!(
+            "SELECT \"{key}\", \"NOME\" FROM \"{table}\"
+             WHERE \"NOME\" IS NOT NULL AND \"NOME\" != ''",
+            key = rel.key,
+            table = rel.table
+        ))?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let (key, nome) = row?;
+            // The name maps to itself, which is what makes this idempotent.
+            map.insert(nome.clone(), nome.clone());
+            map.insert(key, nome);
+        }
+        if !map.is_empty() {
+            maps.insert(col.name.clone(), map);
+        }
+    }
+    if maps.is_empty() {
+        return Ok(0);
+    }
+
+    let mut changed = 0usize;
+    for rule in list_rules(conn)? {
+        let mut filters = rule.filters.clone();
+        let mut touched = false;
+        for f in &mut filters {
+            let Some(map) = maps.get(&f.column) else {
+                continue;
+            };
+            if let Some(name) = map.get(&f.value) {
+                if *name != f.value {
+                    f.value = name.clone();
+                    touched = true;
+                }
+            }
+            for v in &mut f.values {
+                if let Some(name) = map.get(v) {
+                    if *name != *v {
+                        *v = name.clone();
+                        touched = true;
+                    }
+                }
+            }
+        }
+        if touched {
+            conn.execute(
+                "UPDATE email_rules SET filters_json = ?1, updated_at = ?2 WHERE id = ?3",
+                params![
+                    serde_json::to_string(&filters)?,
+                    chrono::Utc::now().to_rfc3339(),
+                    rule.id
+                ],
+            )?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
+}
+
 // ---------------------------------------------------------------- watermark
 
 pub fn watermark(conn: &Connection) -> Result<i64> {
@@ -562,13 +746,46 @@ pub fn watermark(conn: &Connection) -> Result<i64> {
         .unwrap_or(0))
 }
 
-fn set_watermark(conn: &Connection, id: i64) -> Result<()> {
+/// Move the watermark forward, never backward.
+///
+/// The notify step runs detached from the sync that triggered it (see
+/// `do_sync`), so it can outlive its own sync and finish *after* a later sync
+/// has already advanced the watermark. Writing its stale `max_id` verbatim
+/// would rewind the floor and make the next run re-notify acts already seen —
+/// hence the `MAX` in the upsert. `advance_watermark` mirrors this for tests.
+pub(crate) fn set_watermark(conn: &Connection, id: i64) -> Result<()> {
     conn.execute(
         "INSERT INTO email_state (id, watermark_id, updated_at) VALUES (1, ?1, ?2)
-         ON CONFLICT(id) DO UPDATE SET watermark_id = excluded.watermark_id, updated_at = excluded.updated_at",
+         ON CONFLICT(id) DO UPDATE SET watermark_id = MAX(email_state.watermark_id, excluded.watermark_id),
+                                     updated_at = excluded.updated_at",
         params![id, chrono::Utc::now().to_rfc3339()],
     )?;
     Ok(())
+}
+
+/// The value `set_watermark` would leave behind: the larger of the two.
+pub fn advance_watermark(current: i64, candidate: i64) -> i64 {
+    current.max(candidate)
+}
+
+/// The floor to match new acts against, or `None` when nothing is new.
+///
+/// "New" means an act id above the watermark. This is deliberately **not**
+/// derived from `action`: the feed publishes a new dated file each day, so a
+/// daily ingest always reports `"reloaded"`, and a reload rewrites the whole
+/// table — comparing against `MIN(ID)` would treat the entire acervo as new.
+/// The watermark is the only safe floor, because it lives in `email_state`
+/// rather than in `acts` and therefore survives the reload.
+pub fn notification_floor(watermark: i64, max_id: Option<i64>) -> Option<i64> {
+    match max_id {
+        Some(max) if max > watermark => Some(watermark),
+        _ => None,
+    }
+}
+
+/// Take the notification slot, or report that a run is already in flight.
+pub fn try_begin_notification(flag: &std::sync::atomic::AtomicBool) -> bool {
+    !flag.swap(true, std::sync::atomic::Ordering::SeqCst)
 }
 
 /// The floor to match new acts against.
@@ -640,7 +857,7 @@ fn log_entry(conn: &Connection, entry: &LogRow) -> Result<()> {
         "INSERT INTO email_log (at, rule_id, rule_name, recipients, matched, status, error, act_ids)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
-            chrono::Utc::now().to_rfc3339(),
+            entry.at,
             entry.rule_id,
             entry.rule_name,
             entry.recipients,
@@ -654,6 +871,9 @@ fn log_entry(conn: &Connection, entry: &LogRow) -> Result<()> {
 }
 
 struct LogRow {
+    /// When the rule was evaluated. Carded here rather than at insert time so a
+    /// dry run, which is never persisted, still reports a timestamp.
+    at: String,
     rule_id: Option<i64>,
     rule_name: String,
     recipients: String,
@@ -684,7 +904,10 @@ fn escape_html(s: &str) -> String {
 }
 
 /// A rule's matches, ready to be rendered.
-#[derive(Debug, Clone)]
+///
+/// Serialized for the simulation panel, which lists the acts themselves rather
+/// than only saying how many matched.
+#[derive(Debug, Clone, Serialize)]
 pub struct RuleMatches {
     pub rule: EmailRule,
     pub total: i64,
@@ -752,7 +975,7 @@ pub fn compose(matches: &RuleMatches) -> Composed {
            <table cellpadding=\"6\" cellspacing=\"0\" border=\"0\" style=\"border-collapse:collapse\">
              <thead><tr style=\"text-align:left;background:#f0f0f0\">
                <th>Identificação</th><th>Nº oficial</th><th>Publicação</th><th>Tipo</th>
-               <th>Órgão</th><th>Situação</th><th>Ementa</th>
+               <th>Órgão</th><th>Situação</th><th>Resumo/Assunto do Ato</th>
              </tr></thead>
              <tbody>{html_rows}</tbody>
            </table>
@@ -766,6 +989,44 @@ pub fn compose(matches: &RuleMatches) -> Composed {
         text: format!("{text}{note}"),
         html,
     }
+}
+
+/// The name that stands in for a rule when a single act is sent on demand.
+///
+/// A manual send has no filter behind it, but [`compose`] names the message
+/// after a rule, so this stand-in keeps a one-off mail reading exactly like an
+/// automatic one.
+pub const MANUAL_RULE_NAME: &str = "Envio manual";
+
+/// Email one act, to explicit recipients, built the way an automatic
+/// notification is.
+///
+/// Composed through [`compose`] with a single row and a stand-in rule, so the
+/// subject, the text and the HTML table are the automated path's. It is a side
+/// channel, not a notification run: the watermark is neither read nor moved,
+/// and no history is written, so it cannot disturb the automatic sends.
+pub fn send_act(
+    store: &crate::store::Store,
+    settings: &Settings,
+    act_id: i64,
+    recipients: &[String],
+) -> Result<()> {
+    let row = store
+        .act_row(act_id)?
+        .ok_or_else(|| anyhow::anyhow!("ato {act_id} não encontrado"))?;
+    let matches = RuleMatches {
+        rule: EmailRule {
+            id: 0,
+            name: MANUAL_RULE_NAME.to_string(),
+            enabled: true,
+            text: None,
+            filters: Vec::new(),
+            recipients: recipients.to_vec(),
+        },
+        total: 1,
+        rows: vec![row],
+    };
+    deliver(settings, recipients, &compose(&matches))
 }
 
 // ---------------------------------------------------------------- SMTP
@@ -874,51 +1135,84 @@ impl Drop for EmailGuard<'_> {
     }
 }
 
+/// Match one rule against the acervo, ready to render.
+///
+/// `floor` bounds it to acts above the watermark (the notification path);
+/// `None` matches the whole table, which is what the simulation panel wants.
+/// `offset`/`limit` window the rows, so a rule that matches thousands of acts
+/// can be paged instead of being truncated to the first email's worth.
+pub fn query_rule(
+    store: &crate::store::Store,
+    rule: &EmailRule,
+    floor: Option<i64>,
+    offset: i64,
+    limit: i64,
+) -> Result<RuleMatches> {
+    use crate::store::ActQuery;
+    let res = store.search(&ActQuery {
+        text: rule.text.clone(),
+        filters: rule.filters.clone(),
+        min_id: floor,
+        limit,
+        offset,
+        ..Default::default()
+    })?;
+    Ok(RuleMatches {
+        rule: rule.clone(),
+        total: res.total,
+        rows: res.rows,
+    })
+}
+
+/// A rule that could not be evaluated, carrying no rows. `total = -1` marks it,
+/// the same sentinel `run` records for a filter that no longer fits the data.
+pub fn failed_rule(rule: EmailRule) -> RuleMatches {
+    RuleMatches {
+        rule,
+        total: -1,
+        rows: Vec::new(),
+    }
+}
+
 /// Run the enabled rules and email the matches.
 ///
 /// `floor` is the exclusive id floor. `send` false is a dry run that only logs.
 /// Never advances the watermark — the caller decides that — so the manual path
 /// cannot swallow a pending automatic notification.
 ///
+/// Returns this run's entries, and the matched rules themselves, so a caller
+/// that is not sending (the in-app alert) can render the acts without running
+/// the same queries twice.
+///
 /// The store lock is held only to read settings/rules and match, and again to
 /// write the log; SMTP runs in between with no lock held.
-pub fn run(app: &AppHandle, floor: i64, send: bool) -> Result<Vec<EmailLogEntry>> {
-    use crate::store::ActQuery;
-
+pub fn run(app: &AppHandle, floor: i64, send: bool) -> Result<(Vec<EmailLogEntry>, Vec<RuleMatches>)> {
     // --- phase 1: read + match, holding the store lock only briefly ---
     let (settings, matches, failed_rules) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap();
         let conn = store.conn();
 
-        let settings = load_settings(conn, app)?;
+        // Only a real send needs SMTP. Loading the settings decrypts the stored
+        // password, and an alert must not fail because that is misconfigured —
+        // it sends nothing.
+        let settings = if send {
+            Some(load_settings(conn, app)?)
+        } else {
+            None
+        };
         let rules = list_rules(conn)?;
         let mut matches: Vec<RuleMatches> = Vec::new();
         let mut failed: Vec<RuleMatches> = Vec::new();
 
         for rule in rules.into_iter().filter(|r| r.enabled) {
-            let query = ActQuery {
-                text: rule.text.clone(),
-                filters: rule.filters.clone(),
-                min_id: Some(floor),
-                limit: MAX_ITEMS_PER_EMAIL,
-                ..Default::default()
-            };
-            match store.search(&query) {
-                Ok(res) => matches.push(RuleMatches {
-                    rule,
-                    total: res.total,
-                    rows: res.rows,
-                }),
+            match query_rule(&store, &rule, Some(floor), 0, MAX_ITEMS_PER_EMAIL) {
+                Ok(m) => matches.push(m),
                 // A rule whose column vanished from the feed must not abort the
                 // whole run; it is logged and skipped.
                 Err(e) => {
                     log::warn!("regra {} não pôde ser avaliada: {e:#}", rule.name);
-                    failed.push(RuleMatches {
-                        rule,
-                        total: -1,
-                        rows: Vec::new(),
-                    });
+                    failed.push(failed_rule(rule));
                 }
             }
         }
@@ -930,6 +1224,7 @@ pub fn run(app: &AppHandle, floor: i64, send: bool) -> Result<Vec<EmailLogEntry>
 
     for f in &failed_rules {
         outcome.push(LogRow {
+            at: chrono::Utc::now().to_rfc3339(),
             rule_id: Some(f.rule.id),
             rule_name: f.rule.name.clone(),
             recipients: f.rule.recipients.join("; "),
@@ -949,6 +1244,7 @@ pub fn run(app: &AppHandle, floor: i64, send: bool) -> Result<Vec<EmailLogEntry>
 
         let row = if !send {
             LogRow {
+                at: chrono::Utc::now().to_rfc3339(),
                 rule_id: Some(m.rule.id),
                 rule_name: m.rule.name.clone(),
                 recipients: m.rule.recipients.join("; "),
@@ -958,8 +1254,11 @@ pub fn run(app: &AppHandle, floor: i64, send: bool) -> Result<Vec<EmailLogEntry>
                 act_ids: Some(ids.join(",")),
             }
         } else {
-            match deliver(&settings, &m.rule.recipients, &composed) {
+            // `settings` is `Some` whenever `send` is set (phase 1).
+            let settings = settings.as_ref().expect("settings loaded for a send");
+            match deliver(settings, &m.rule.recipients, &composed) {
                 Ok(()) => LogRow {
+                    at: chrono::Utc::now().to_rfc3339(),
                     rule_id: Some(m.rule.id),
                     rule_name: m.rule.name.clone(),
                     recipients: m.rule.recipients.join("; "),
@@ -971,6 +1270,7 @@ pub fn run(app: &AppHandle, floor: i64, send: bool) -> Result<Vec<EmailLogEntry>
                 Err(e) => {
                     log::warn!("envio da regra {} falhou: {e:#}", m.rule.name);
                     LogRow {
+                        at: chrono::Utc::now().to_rfc3339(),
                         rule_id: Some(m.rule.id),
                         rule_name: m.rule.name.clone(),
                         recipients: m.rule.recipients.join("; "),
@@ -986,7 +1286,11 @@ pub fn run(app: &AppHandle, floor: i64, send: bool) -> Result<Vec<EmailLogEntry>
     }
 
     // --- phase 3: write the log, holding the lock briefly again ---
-    if !outcome.is_empty() {
+    //
+    // A dry run is a preview, not a notification: persisting it would both invent
+    // history and, because the caller sums the rows it gets back, let an earlier
+    // preview leak into a later run's total. Only a real send is recorded.
+    if send && !outcome.is_empty() {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap();
         let conn = store.conn();
@@ -995,19 +1299,64 @@ pub fn run(app: &AppHandle, floor: i64, send: bool) -> Result<Vec<EmailLogEntry>
         }
     }
 
-    // Return the fresh log for the caller.
-    let state = app.state::<AppState>();
-    let store = state.store.lock().unwrap();
-    list_log(store.conn(), 50)
+    // Return exactly this run's outcome. `list_log` would return the whole
+    // history, so a caller summing `matched` would count previous runs too.
+    Ok((
+        outcome
+            .into_iter()
+            .map(|row| EmailLogEntry {
+                at: row.at,
+                rule_id: row.rule_id,
+                rule_name: row.rule_name,
+                recipients: row.recipients,
+                matched: row.matched,
+                status: row.status,
+                error: row.error,
+            })
+            .collect(),
+        matches,
+    ))
 }
 
-/// The automatic path: called after a sync. `appended` runs the rules; anything
-/// else only advances the watermark (a reload brings in the whole feed and must
-/// never be mailed).
-pub fn notify_after_sync(app: &AppHandle, action: &str) -> Result<()> {
+/// What surfaced the new acts, which decides how they are reported.
+///
+/// A manual sync must not email: the user is right there, so an in-app alert is
+/// the whole notification. An automatic one runs unattended and has to reach
+/// the user by mail. Both spend the same watermark, so a batch is never
+/// surfaced twice — by alert and then again by mail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    Manual,
+    Automatic,
+}
+
+impl Trigger {
+    /// Whether this trigger reaches the user by email.
+    pub fn emails(self) -> bool {
+        matches!(self, Trigger::Automatic)
+    }
+}
+
+/// Report the acts that arrived with a sync, over the channel its trigger chose.
+///
+/// `report.action` is used only for logging: it cannot gate the work, because
+/// the feed publishes a *new dated file* each day rather than appending to one,
+/// so every daily ingest reports `"reloaded"`. Whether anything is new is
+/// decided by comparing the act maximum against the watermark instead.
+pub fn notify_after_sync(
+    app: &AppHandle,
+    report: &crate::sync::SyncReport,
+    trigger: Trigger,
+) -> Result<()> {
+    use tauri::Emitter;
+
     let state = app.state::<AppState>();
-    if state.emailing.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return Ok(()); // a run is already in progress
+    if !try_begin_notification(&state.emailing) {
+        // Another run holds the slot. Nothing is lost: the watermark has not
+        // moved, so a later sync still finds these acts below `max` and
+        // reports them then.
+        log::info!("email: execução já em andamento; adiada");
+        return Ok(());
     }
     let _guard = EmailGuard { app };
 
@@ -1016,17 +1365,45 @@ pub fn notify_after_sync(app: &AppHandle, action: &str) -> Result<()> {
         let conn = store.conn();
         let count = act_count_or_zero(conn)?;
         let max = store.max_act_id()?;
+        // `effective_floor` seeds the watermark on a first run against an
+        // already-populated database and returns the seed, so a first load
+        // reports nothing below.
         (effective_floor(conn, count, max)?, max.unwrap_or(0))
     };
 
-    log::info!("email: apos sincronizacao ({action}), piso {floor}");
+    let Some(floor) = notification_floor(floor, Some(max_id)) else {
+        log::info!("email: apos sincronizacao ({}) nada novo", report.action);
+        // A manual sync that turns up nothing must also retract the previous
+        // alert, or the window keeps showing acts from an earlier run.
+        if !trigger.emails() {
+            *state.last_alert.lock().unwrap() = None;
+        }
+        return Ok(());
+    };
 
-    if action == "appended" {
-        let _ = run(app, floor, true)?;
+    log::info!(
+        "email: apos sincronizacao ({}, {}), piso {floor} -> max {max_id}",
+        report.action,
+        if trigger.emails() { "automatico" } else { "manual" }
+    );
+
+    let (entries, matches) = run(app, floor, trigger.emails())?;
+
+    // A failure must not move the floor: the next run has to retry rather than
+    // silently drop the acts.
+    if entries.iter().any(|e| e.status == "failed") {
+        log::warn!("email: piso mantido em {floor}; houve falha no envio");
+        return Ok(());
     }
 
-    // Advance the watermark either way: after an append the new acts are handled;
-    // after a reload there is nothing to mail but the floor must move forward.
+    if !trigger.emails() {
+        let alert = build_alert(&matches, &report.snapshot, max_id);
+        if alert.total_matched > 0 {
+            *state.last_alert.lock().unwrap() = Some(alert.clone());
+            let _ = app.emit(crate::SYNC_MATCHES_EVENT, &alert);
+        }
+    }
+
     let store = state.store.lock().unwrap();
     set_watermark(store.conn(), max_id)?;
     Ok(())
@@ -1139,6 +1516,7 @@ mod tests {
                 numero_oficial: None,
                 ano_publicacao: None,
                 data_publicacao: None,
+                data_criacao: None,
                 tipo: None,
                 orgao: None,
                 situacao: None,
@@ -1150,5 +1528,167 @@ mod tests {
         assert!(!c.html.contains("<script>"), "{}", c.html);
         assert!(c.html.contains("&lt;script&gt;"));
         assert!(c.html.contains("a &amp; b"));
+    }
+
+    /// A store with the email tables, a `TIPO_ATO` dimension, and one rule.
+    fn store_with_rule(filters: Vec<crate::store::Filter>) -> crate::store::Store {
+        let mut store = crate::store::Store::open_in_memory().unwrap();
+        store
+            .ensure_act_tables(&crate::store::test_schema())
+            .unwrap();
+        store
+            .replace_dimension(
+                "TIPO_ATO",
+                &["ID".into(), "NOME".into()],
+                &[
+                    vec![Some("50".into()), Some("ACORDÃO".into())],
+                    vec![Some("195".into()), Some("AVISO DE LICITAÇÃO".into())],
+                ],
+            )
+            .unwrap();
+        let conn = store.conn();
+        save_rule(
+            conn,
+            &EmailRuleInput {
+                id: None,
+                name: "Regra".into(),
+                enabled: true,
+                text: None,
+                filters,
+                recipients: "a@b.com".into(),
+            },
+        )
+        .unwrap();
+        store
+    }
+
+    #[test]
+    fn nothing_is_new_when_the_max_equals_the_watermark() {
+        // The boundary the daily feed lands on: an unchanged acervo must not
+        // report, and neither may a first run that just seeded the watermark.
+        assert_eq!(notification_floor(480197, Some(480197)), None);
+        assert_eq!(notification_floor(480197, None), None);
+        assert_eq!(notification_floor(480090, Some(480197)), Some(480090));
+    }
+
+    #[test]
+    fn a_manual_sync_never_emails() {
+        assert!(!Trigger::Manual.emails());
+        assert!(Trigger::Automatic.emails());
+    }
+
+    #[test]
+    fn the_watermark_only_moves_forward() {
+        // A stale write from a detached notification must not rewind the floor:
+        // that would re-notify acts already surfaced.
+        assert_eq!(advance_watermark(480197, 480090), 480197);
+        assert_eq!(advance_watermark(480090, 480197), 480197);
+        assert_eq!(advance_watermark(1, 1), 1);
+    }
+
+    #[test]
+    fn the_notification_slot_admits_one_run_at_a_time() {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        assert!(try_begin_notification(&flag));
+        assert!(!try_begin_notification(&flag));
+        flag.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(try_begin_notification(&flag));
+    }
+
+    fn rule_named(name: &str, id: i64) -> EmailRule {
+        EmailRule {
+            id,
+            name: name.into(),
+            enabled: true,
+            text: None,
+            filters: vec![],
+            recipients: vec!["a@b.com".into()],
+        }
+    }
+
+    fn act_row(id: i64, ident: &str) -> crate::store::ActRow {
+        crate::store::ActRow {
+            id,
+            numero_identificacao: Some(ident.into()),
+            numero_oficial: None,
+            ano_publicacao: None,
+            data_publicacao: Some("2026-10-08 00:00:00.000".into()),
+            data_criacao: None,
+            tipo: Some("DECRETO".into()),
+            orgao: None,
+            situacao: None,
+            sumula: None,
+            snippet: None,
+        }
+    }
+
+    #[test]
+    fn the_alert_samples_the_acts_and_keeps_the_full_count() {
+        let rows: Vec<_> = (1..=8).map(|i| act_row(i, &format!("DOC{i}"))).collect();
+        let matches = vec![
+            RuleMatches {
+                rule: rule_named("Decretos", 1),
+                total: 40, // more than were fetched, so the count must stand alone
+                rows,
+            },
+            // A rule with nothing to report is left out entirely, so the alert
+            // does not list empty rules.
+            RuleMatches {
+                rule: rule_named("Vazio", 2),
+                total: 0,
+                rows: vec![],
+            },
+        ];
+
+        let alert = build_alert(&matches, "2026-10-09_x.csv", 480197);
+        assert_eq!(alert.total_matched, 40);
+        assert_eq!(alert.snapshot, "2026-10-09_x.csv");
+        assert_eq!(alert.max_id, 480197);
+        assert_eq!(alert.rules.len(), 1);
+
+        let rule = &alert.rules[0];
+        assert_eq!(rule.rule_name, "Decretos");
+        assert_eq!(rule.matched, 40);
+        assert_eq!(rule.samples.len(), MAX_ALERT_SAMPLES);
+        assert_eq!(rule.samples[0].id, 1);
+        assert_eq!(rule.samples[0].numero_identificacao.as_deref(), Some("DOC1"));
+        assert_eq!(rule.samples[0].tipo.as_deref(), Some("DECRETO"));
+    }
+
+    #[test]
+    fn related_filters_are_mapped_from_key_to_name_and_are_idempotent() {
+        let fk = |value: &str, values: Vec<&str>| crate::store::Filter {
+            column: "TIPO_ATO_ID".into(),
+            op: crate::store::Op::Eq,
+            value: value.into(),
+            values: values.into_iter().map(String::from).collect(),
+            logic: crate::store::Logic::And,
+        };
+        let store = store_with_rule(vec![fk("50", vec!["195"])]);
+
+        let schema = crate::store::test_schema();
+        let changed = normalize_related_filters(store.conn(), &schema).unwrap();
+        assert_eq!(changed, 1);
+
+        let rule = &list_rules(store.conn()).unwrap()[0];
+        assert_eq!(rule.filters[0].value, "ACORDÃO");
+        assert_eq!(rule.filters[0].values, vec!["AVISO DE LICITAÇÃO".to_string()]);
+
+        // A second pass over names must not report or write anything.
+        assert_eq!(normalize_related_filters(store.conn(), &schema).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_filter_on_an_unknown_column_is_left_alone() {
+        let store = store_with_rule(vec![crate::store::Filter {
+            column: "SUMULA".into(),
+            op: crate::store::Op::Eq,
+            value: "50".into(),
+            values: vec![],
+            logic: crate::store::Logic::And,
+        }]);
+        let changed = normalize_related_filters(store.conn(), &crate::store::test_schema()).unwrap();
+        assert_eq!(changed, 0);
+        assert_eq!(list_rules(store.conn()).unwrap()[0].filters[0].value, "50");
     }
 }

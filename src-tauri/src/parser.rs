@@ -79,13 +79,6 @@ fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
         .map(|p| p + from)
 }
 
-/// The record terminator.
-pub const TERM: &[u8] = b"\x00\r\n";
-
-/// Length of [`TERM`], for callers that re-fetch the bytes just before a known
-/// record boundary to check they are still a boundary.
-pub const TERM_LEN: usize = TERM.len();
-
 /// Find the `;` that ends the metadata field beginning at `from`.
 ///
 /// Returns `None` when the record runs out before the field does — a truncated
@@ -255,15 +248,6 @@ pub fn split_records(buf: &[u8]) -> (Vec<&[u8]>, &[u8]) {
         i += 1;
     }
     (out, &buf[start..])
-}
-
-/// Validate that a decoded column looks like the type the schema promised.
-///
-/// Used by the delta path to decide whether an append-only assumption held: if a
-/// supposedly-numeric key column contains text, the layout changed and the caller
-/// should fall back to a full re-ingest.
-pub fn looks_numeric(s: &str) -> bool {
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Parse the header names out of a snapshot header line, for cross-checking

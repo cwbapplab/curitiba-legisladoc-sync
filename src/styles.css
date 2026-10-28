@@ -666,10 +666,10 @@ body {
  * Larguras em porcentagem, não em pixels.
  *
  * Com `table-layout: fixed` e larguras fixas, a soma dos pixels podia passar da
- * largura da janela: a coluna sem largura (Ementa) então ficava com zero e só
- * se chegava a ela rolando de lado. Em porcentagem a soma é sempre 100% da
- * tabela — ela nunca transborda, e a Ementa, que é o texto que se lê, cresce
- * junto com a janela.
+ * largura da janela: a coluna sem largura (Resumo/Assunto do Ato) então ficava
+ * com zero e só se chegava a ela rolando de lado. Em porcentagem a soma é sempre
+ * 100% da tabela — ela nunca transborda, e o Resumo/Assunto do Ato, que é o
+ * texto que se lê, cresce junto com a janela.
  */
 .col-ident {
   width: 15%;
@@ -678,6 +678,9 @@ body {
   width: 7%;
 }
 .col-data {
+  width: 10%;
+}
+.col-criacao {
   width: 10%;
 }
 .col-ano {
@@ -690,7 +693,7 @@ body {
   width: 16%;
 }
 .col-sumula {
-  width: 33%;
+  width: 23%;
 }
 
 /* A listagem de arquivos: o caminho é o que interessa e fica com o resto. */
@@ -701,7 +704,25 @@ body {
   width: 110px;
 }
 .col-updated {
-  width: 168px;
+  width: 200px;
+}
+/*
+ * A data/hora do último processamento, como etiqueta. Com `table-layout: fixed`
+ * a coluna tem largura fixa, então ela é larga o bastante para a frase inteira
+ * numa linha só: antes o `inline-flex` do `br-tag` encolhia até a largura da
+ * coluna e o texto quebrava em duas linhas. O cabeçalho recebe o mesmo recuo da
+ * célula para o rótulo não ficar à esquerda das etiquetas.
+ */
+.col-synced {
+  width: 360px;
+}
+.app-table thead th.col-synced {
+  padding: 0 var(--spacing-scale-2x);
+}
+.col-synced .br-tag {
+  font-size: var(--font-size-scale-down-01);
+  justify-content: flex-start;
+  white-space: nowrap;
 }
 
 .empty-row td {
@@ -780,6 +801,14 @@ body {
   flex: 1;
   overflow: auto;
   padding: var(--spacing-scale-3x);
+}
+
+/* O envio avulso do ato fica no topo do painel, separado dos campos por uma
+   linha — é uma ação sobre o ato, não um campo dele. */
+.drawer-mail {
+  margin-bottom: var(--spacing-scale-3x);
+  padding-bottom: var(--spacing-scale-2x);
+  border-bottom: 1px solid var(--border-color);
 }
 
 .fields {
@@ -961,6 +990,36 @@ body {
   font-weight: var(--font-weight-semi-bold);
 }
 
+/* O alerta de atualização manual: regras que casaram e uma amostra dos atos. */
+.alert-rules {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-scale-half);
+}
+
+.alert-rules > li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-scale-base);
+  flex-wrap: wrap;
+}
+
+.alert-rule-name {
+  font-weight: var(--font-weight-semi-bold);
+}
+
+.alert-acts {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 var(--spacing-scale-2x);
+  flex-basis: 100%;
+  font-size: var(--font-size-scale-down-01);
+  color: var(--color-secondary-07);
+}
+
 .section-title {
   margin: 0 0 var(--spacing-scale-base);
   font-size: var(--font-size-scale-down-01);
@@ -968,6 +1027,87 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: var(--color-secondary-07);
+}
+
+/* A simulação: por regra, os atos novos que casariam. */
+.preview-rule + .preview-rule {
+  margin-top: var(--spacing-scale-3x);
+  padding-top: var(--spacing-scale-2x);
+  border-top: 1px solid var(--border-color);
+}
+
+.preview-rule .section-title {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--spacing-scale-base);
+}
+
+/*
+ * "N ato(s) · destinatários" ao lado do nome da regra. Não herda o caixa-alta
+ * nem o espaçamento do título: é informação, não cabeçalho.
+ */
+.preview-rule-meta {
+  text-transform: none;
+  letter-spacing: normal;
+  font-weight: normal;
+  color: var(--color-secondary-07);
+}
+
+.preview-acts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-scale-half);
+}
+
+.preview-acts li {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--spacing-scale-base);
+  padding: var(--spacing-scale-half);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.preview-acts li:hover {
+  background: var(--color-secondary-02);
+}
+
+.preview-acts li:focus-visible {
+  outline: var(--focus-width) var(--focus-style) var(--focus-color);
+  outline-offset: calc(-1 * var(--focus-width));
+}
+
+.preview-act-date {
+  color: var(--color-secondary-07);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/*
+ * O campo de texto fecha a linha do ato: ocupa a largura toda, traz o rótulo do
+ * feed ("Resumo/Assunto do Ato") à frente do valor e corta com reticências.
+ */
+.preview-act-text {
+  flex-basis: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-act-field {
+  color: var(--color-secondary-07);
+  font-weight: var(--font-weight-semi-bold);
+}
+
+/* O pager de cada regra na simulação, logo abaixo da página de atos. */
+.preview-rule .br-pagination {
+  margin-top: var(--spacing-scale-base);
 }
 
 .muted {

@@ -1,0 +1,67 @@
+MIT License
+
+Copyright (c) 2026 Erick
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+ADDITIONAL DISCLAIMER — "AS IS" USE
+
+Legisladoc Sync (the "Software") is provided "AS IS" and "AS AVAILABLE",
+without warranty of any kind, express or implied, including but not limited
+to the warranties of merchantability, fitness for a particular purpose,
+title, accuracy, and non-infringement. The entire risk as to the quality,
+performance, and results obtained from the Software is with you.
+
+Without limiting the foregoing, the authors and copyright holders do not
+warrant or represent that:
+
+- the Software will be uninterrupted, error-free, secure, or free of harmful
+  components;
+- any data synchronized, downloaded, indexed, stored, or e-mailed by the
+  Software will be accurate, complete, timely, or available;
+- defects in the Software will be corrected; or
+- the Software will operate with any particular hardware, operating system,
+  network, or third-party service.
+
+You are solely responsible for the use of the Software and for any
+consequences arising from it, including but not limited to data loss,
+corruption of local files, disclosure of credentials or e-mail passwords,
+network traffic, and compliance with the terms of service and the law
+applicable to any third-party content or server you access through the
+Software. Back up your data and review the configuration before use.
+
+To the maximum extent permitted by applicable law, in no event shall the
+authors or copyright holders be liable for any claim, damages, or other
+liability, whether in an action of contract, tort, or otherwise, arising
+from, out of, or in connection with the Software or the use or other
+dealings in the Software, even if advised of the possibility of such damage.
+
+Some jurisdictions do not allow the exclusion of certain warranties or the
+limitation or exclusion of liability for incidental or consequential
+damages, so some of the above limitations or exclusions may not apply to
+you. In that case, the authors' liability shall be limited to the greatest
+extent permitted by law.
+
+This disclaimer is an additional notice and does not modify, replace, or
+limit the permissions granted under the MIT License above. Third-party
+components included in or used to build the Software are provided under
+their own licenses and are also provided "AS IS", as stated in
+THIRD-PARTY-NOTICES.md.

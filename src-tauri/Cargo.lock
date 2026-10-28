@@ -1921,7 +1921,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "legisladoc-browser"
+name = "legisladoc-sync"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",

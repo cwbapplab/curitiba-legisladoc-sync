@@ -16,7 +16,6 @@
 mod db;
 mod email;
 mod feed;
-mod ingest;
 mod parser;
 mod remote;
 mod schema;
@@ -46,13 +45,19 @@ pub struct AppState {
     /// rsync url currently being browsed; the UI can point at another feed.
     source: Mutex<String>,
     syncing: AtomicBool,
-    /// Guards against two notification runs overlapping (a scheduled sync and a
-    /// manual "rodar agora").
+    /// Guards against two notification runs overlapping — the scheduled sync and
+    /// a manual "atualizar agora" both take it.
     emailing: AtomicBool,
     interval_minutes: AtomicU64,
     last_error: Mutex<Option<String>>,
     last_report: Mutex<Option<SyncReport>>,
+    /// The last manual sync's matches. Kept so a window that reloads still
+    /// shows the alert; the event alone would be missed.
+    last_alert: Mutex<Option<email::SyncAlert>>,
 }
+
+/// Event carrying a manual sync's matches to the alert area.
+pub const SYNC_MATCHES_EVENT: &str = "sync-matches";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchPage {
@@ -70,6 +75,9 @@ pub struct AppSnapshot {
     pub last_error: Option<String>,
     /// What the last act ingest did, so the UI can say "appended 12 new acts".
     pub act_report: Option<SyncReport>,
+    /// The last manual sync's matching acts, for the in-app alert area. Absent
+    /// until a manual sync finds something.
+    pub alert: Option<email::SyncAlert>,
 }
 
 /// Which act columns the UI may filter on, and which it may sort by.
@@ -105,7 +113,7 @@ where
 ///
 /// Only one refresh runs at a time; a second caller returns an error immediately
 /// rather than queueing duplicate work against a public server.
-async fn do_sync(app: &AppHandle) -> anyhow::Result<SyncReport> {
+async fn do_sync(app: &AppHandle, trigger: email::Trigger) -> anyhow::Result<SyncReport> {
     if app.state::<AppState>().syncing.swap(true, Ordering::SeqCst) {
         anyhow::bail!("uma sincronização já está em andamento");
     }
@@ -143,18 +151,28 @@ async fn do_sync(app: &AppHandle) -> anyhow::Result<SyncReport> {
     };
     let _ = app.emit("sync-complete", &payload);
 
-    // Notify on new acts, off the async runtime and fire-and-forget: a slow or
-    // dead SMTP server must never delay the sync result. Only a successful sync
-    // is considered, and the email step itself decides whether the action
-    // warrants sending (see `email::notify_after_sync`).
+    // Report the new acts over the channel the trigger chose: an in-app alert
+    // for a manual sync, mail for an automatic one. Only a successful sync is
+    // considered, and `notify_after_sync` decides from the watermark whether
+    // anything is actually new.
+    //
+    // A manual sync is awaited: it sends no mail, so it is fast, and the alert
+    // must be in place before `sync_now` resolves — the frontend refreshes its
+    // snapshot as soon as the command returns. An automatic one stays detached
+    // so a slow or dead SMTP server never delays the sync result; that is safe
+    // because the watermark only ever moves forward.
     if err.is_none() {
         let handle = app.clone();
-        let action = report.action.clone();
-        tauri::async_runtime::spawn_blocking(move || {
-            if let Err(e) = email::notify_after_sync(&handle, &action) {
-                log::warn!("email notification run failed: {e:#}");
-            }
-        });
+        let reported = report.clone();
+        if trigger.emails() {
+            tauri::async_runtime::spawn_blocking(move || {
+                if let Err(e) = email::notify_after_sync(&handle, &reported, trigger) {
+                    log::warn!("email notification run failed: {e:#}");
+                }
+            });
+        } else if let Err(e) = email::notify_after_sync(&app, &report, trigger) {
+            log::warn!("alert run failed: {e:#}");
+        }
     }
 
     match err {
@@ -187,6 +205,16 @@ async fn refresh_all(app: &AppHandle, source: &str) -> anyhow::Result<SyncReport
     .await
     .map_err(anyhow::Error::msg)?;
 
+    // 3. Stamp the files this run ingested so the explorer can badge them. A
+    //    failure here is cosmetic and must not fail an otherwise good sync.
+    if !report.processed.is_empty() {
+        let state = app.state::<AppState>();
+        let conn = state.db.lock().unwrap();
+        if let Err(e) = db::record_processed(&conn, &report.processed) {
+            log::warn!("recording processed files failed: {e:#}");
+        }
+    }
+
     Ok(report)
 }
 
@@ -207,7 +235,9 @@ impl Drop for SyncGuard<'_> {
 
 #[tauri::command]
 async fn sync_now(app: AppHandle) -> Result<SyncReport, String> {
-    do_sync(&app).await.map_err(|e| format!("{e:#}"))
+    do_sync(&app, email::Trigger::Manual)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -220,6 +250,7 @@ async fn get_state(app: AppHandle) -> Result<AppSnapshot, String> {
         let source = state.source.lock().unwrap().clone();
         let last_error = state.last_error.lock().unwrap().clone();
         let act_report = state.last_report.lock().unwrap().clone();
+        let alert = state.last_alert.lock().unwrap().clone();
         Ok(AppSnapshot {
             summary: db::summary(&conn).map_err(|e| format!("{e:#}"))?,
             last_sync: db::last_sync(&conn).map_err(|e| format!("{e:#}"))?,
@@ -228,6 +259,7 @@ async fn get_state(app: AppHandle) -> Result<AppSnapshot, String> {
             interval_minutes: state.interval_minutes.load(Ordering::SeqCst),
             last_error,
             act_report,
+            alert,
         })
     })
     .await
@@ -436,6 +468,27 @@ async fn send_test_email(app: AppHandle, to: String) -> Result<(), String> {
     .await
 }
 
+/// Email a single act to explicit recipients, at the user's request.
+///
+/// A side channel alongside the rule-driven notifications: it sends exactly the
+/// act named, to the addresses given, using the stored SMTP settings and the
+/// same message layout. It never reads or moves the watermark and writes no
+/// history, so it cannot disturb the automatic runs.
+#[tauri::command]
+async fn send_act_email(app: AppHandle, id: i64, recipients: String) -> Result<(), String> {
+    blocking(move || {
+        let recipients = email::parse_recipients(&recipients);
+        if recipients.is_empty() {
+            return Err("informe pelo menos um destinatário".into());
+        }
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        let settings = email::load_settings(store.conn(), &app).map_err(|e| format!("{e:#}"))?;
+        email::send_act(&store, &settings, id, &recipients).map_err(|e| format!("{e:#}"))
+    })
+    .await
+}
+
 #[tauri::command]
 async fn list_email_rules(app: AppHandle) -> Result<Vec<EmailRule>, String> {
     blocking(move || {
@@ -486,28 +539,57 @@ async fn list_email_log(app: AppHandle, limit: Option<i64>) -> Result<Vec<EmailL
     .await
 }
 
-/// Manual run. `send = false` is a dry run. `since_watermark = false` matches the
-/// whole store, so it can be exercised without waiting for a feed append — and,
-/// deliberately, it never advances the automatic watermark.
+/// The simulation panel's first page: every enabled rule with what it matches
+/// across the **whole acervo**, not just the acts since the last notification.
+///
+/// `limit` is the page size. Nothing is sent, no history is written, and the
+/// watermark is left alone. There is deliberately no way to send from here: mail
+/// only leaves the app on the automatic post-sync run.
 #[tauri::command]
-async fn run_email_rules_now(
+async fn simulate_email_rules(
     app: AppHandle,
-    send: bool,
-    since_watermark: bool,
-) -> Result<Vec<EmailLogEntry>, String> {
+    limit: i64,
+) -> Result<Vec<email::RuleMatches>, String> {
     blocking(move || {
-        let floor = if since_watermark {
-            let state = app.state::<AppState>();
-            let store = state.store.lock().unwrap();
-            let count = email::act_count_or_zero(store.conn()).map_err(|e| format!("{e:#}"))?;
-            let max = store.max_act_id().map_err(|e| format!("{e:#}"))?;
-            email::effective_floor(store.conn(), count, max).map_err(|e| format!("{e:#}"))?
-        } else {
-            0
-        };
-        let log = email::run(&app, floor, send).map_err(|e| format!("{e:#}"))?;
-        let _ = app.emit("email-notified", &log);
-        Ok(log)
+        let limit = limit.clamp(1, 200);
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        let mut out = Vec::new();
+        for rule in email::list_rules(store.conn())
+            .map_err(|e| format!("{e:#}"))?
+            .into_iter()
+            .filter(|r| r.enabled)
+        {
+            // A rule whose column vanished from the feed must not blank the
+            // whole panel; it is shown flagged instead.
+            match email::query_rule(&store, &rule, None, 0, limit) {
+                Ok(m) => out.push(m),
+                Err(e) => {
+                    log::warn!("regra {} não pôde ser simulada: {e:#}", rule.name);
+                    out.push(email::failed_rule(rule));
+                }
+            }
+        }
+        Ok(out)
+    })
+    .await
+}
+
+/// One page of a single rule's matches over the whole acervo, for the panel's
+/// pager.
+#[tauri::command]
+async fn simulate_email_rule_page(
+    app: AppHandle,
+    rule_id: i64,
+    offset: i64,
+    limit: i64,
+) -> Result<email::RuleMatches, String> {
+    blocking(move || {
+        let limit = limit.clamp(1, 200);
+        let state = app.state::<AppState>();
+        let store = state.store.lock().unwrap();
+        let rule = email::get_rule(store.conn(), rule_id).map_err(|e| format!("{e:#}"))?;
+        email::query_rule(&store, &rule, None, offset.max(0), limit).map_err(|e| format!("{e:#}"))
     })
     .await
 }
@@ -533,6 +615,7 @@ pub fn run() {
                 interval_minutes: AtomicU64::new(DEFAULT_INTERVAL_MINUTES),
                 last_error: Mutex::new(None),
                 last_report: Mutex::new(None),
+                last_alert: Mutex::new(None),
             });
 
             // Populate on first run, then keep refreshing on the configured
@@ -540,7 +623,7 @@ pub fn run() {
             // `sync-complete` arrives, so a slow feed never blocks startup.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = do_sync(&handle).await {
+                if let Err(e) = do_sync(&handle, email::Trigger::Automatic).await {
                     log::warn!("initial refresh failed: {e:#}");
                 }
                 loop {
@@ -549,7 +632,7 @@ pub fn run() {
                         state.interval_minutes.load(Ordering::SeqCst).max(1)
                     };
                     tokio::time::sleep(Duration::from_secs(minutes * 60)).await;
-                    if let Err(e) = do_sync(&handle).await {
+                    if let Err(e) = do_sync(&handle, email::Trigger::Automatic).await {
                         log::warn!("scheduled refresh failed: {e:#}");
                     }
                 }
@@ -572,12 +655,14 @@ pub fn run() {
             save_email_settings,
             test_email_connection,
             send_test_email,
+            send_act_email,
             list_email_rules,
             save_email_rule,
             delete_email_rule,
             get_email_status,
             list_email_log,
-            run_email_rules_now
+            simulate_email_rules,
+            simulate_email_rule_page
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

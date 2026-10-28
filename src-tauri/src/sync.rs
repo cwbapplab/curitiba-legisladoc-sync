@@ -9,8 +9,11 @@
 //!    column is stored rather than truncated.
 //! 3. Replace the dimension tables wholesale — they are a few KB each, and a
 //!    blind replace avoids having to diff them.
-//! 4. Ingest the act snapshot, which is the only large file. `HEAD` first, then
-//!    decide between "nothing to do", "fetch the new tail" and "re-read it all".
+//! 4. Import the act snapshot, which is the only large file. `HEAD` first: if the
+//!    size and ETag match the revision we last imported there is nothing to do.
+//!    Otherwise the whole file is staged and only the rows whose `ID` is above the
+//!    stored maximum are migrated into the act table, then the staging table is
+//!    dropped.
 //!
 //! Progress is reported through events so a first run (349k acts, ~1.4 GB) can
 //! show what it is doing instead of looking hung.
@@ -19,11 +22,10 @@ use anyhow::{bail, Context, Result};
 use tauri::{AppHandle, Emitter};
 
 use crate::feed::{self, RemoteFile};
-use crate::ingest::{self, Plan, SnapshotState};
 use crate::parser;
 use crate::remote;
 use crate::schema::Schema;
-use crate::store::Store;
+use crate::store::{SnapshotState, Store};
 
 /// The act snapshot, identified from its file name.
 pub struct SnapshotFile {
@@ -42,13 +44,17 @@ pub struct DimensionFile {
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SyncReport {
     pub snapshot: String,
-    /// `unchanged`, `appended` or `reloaded`.
+    /// `unchanged` or `imported`.
     pub action: String,
     pub rows_added: i64,
     pub total_rows: i64,
     pub dimensions: usize,
     pub bytes_fetched: u64,
     pub detail: Option<String>,
+    /// Base file names ingested in this run, recorded by the caller so the
+    /// explorer can badge them. Not part of the UI payload.
+    #[serde(skip)]
+    pub processed: Vec<String>,
 }
 
 /// Emitted while a long ingest runs, so the UI can show real progress.
@@ -210,7 +216,7 @@ fn decode(bytes: &[u8]) -> String {
     }
 }
 
-/// Ingest the act snapshot, using the delta path when it is safe to.
+/// Import the act snapshot, skipping the work when it has not changed.
 pub fn ingest_snapshot(app: &AppHandle, store: &mut Store, snapshot: &SnapshotFile) -> Result<SyncReport> {
     let url = remote::url_for(&snapshot.name);
 
@@ -220,99 +226,51 @@ pub fn ingest_snapshot(app: &AppHandle, store: &mut Store, snapshot: &SnapshotFi
     let remote_size = info.size.unwrap_or(snapshot.size.max(0) as u64);
     let etag = info.etag.as_deref();
 
-    // Record the validators before touching data, so an interrupted run still
-    // knows which revision it was working against.
-    store.upsert_snapshot_meta(&snapshot.name, remote_size, etag, info.last_modified.as_deref())?;
+    // Read the recorded revision *before* overwriting it, so a rewrite that kept
+    // the file length is still caught by its new ETag rather than being masked by
+    // this run's own bookkeeping.
+    let prior = store.snapshot_state(&snapshot.name)?;
+    if is_unchanged(prior.as_ref(), remote_size, etag) {
+        let total = store.act_count()?;
+        emit(app, "done", total, 0, remote_size);
+        return Ok(SyncReport {
+            snapshot: snapshot.name.clone(),
+            action: "unchanged".into(),
+            rows_added: 0,
+            total_rows: total,
+            ..Default::default()
+        });
+    }
 
-    let mut state = store.snapshot_state(&snapshot.name)?;
-    let plan = plan_for(&url, remote_size, etag, state.take())?;
+    import_via_staging(app, store, snapshot, &url, remote_size, etag, info.last_modified.as_deref())
+}
 
-    match plan {
-        Plan::Unchanged => {
-            let total = store.act_count()?;
-            emit(app, "done", total, 0, remote_size);
-            return Ok(SyncReport {
-                snapshot: snapshot.name.clone(),
-                action: "unchanged".into(),
-                rows_added: 0,
-                total_rows: total,
-                ..Default::default()
-            });
-        }
-        Plan::Append { from, to } => {
-            emit(app, "tail", 0, 0, remote_size - from);
-            let stream = remote::get_tail(&url, from)?;
-            let stats = ingest::scan_tail(stream).context("scanning the snapshot tail")?;
-
-            // The tail must be a genuine append: every new id has to sit above
-            // the stored maximum. If it does not, the file was rewritten and the
-            // rows must not be trusted.
-            let last_id = store.max_act_id()?;
-            if let Err(e) = ingest::validate_append(&stats.rows, last_id) {
-                return full_reload(app, store, snapshot, &url, remote_size, etag, info.last_modified.as_deref(), &e.to_string());
-            }
-
-            store.insert_rows(&stats.rows)?;
-            let total = store.act_count()?;
-            store.commit_snapshot_progress(
-                &snapshot.name,
-                to,
-                store.max_act_id()?,
-                total,
-            )?;
-            emit(app, "done", total, 0, remote_size);
-            return Ok(SyncReport {
-                snapshot: snapshot.name.clone(),
-                action: "appended".into(),
-                rows_added: stats.rows.len() as i64,
-                total_rows: total,
-                bytes_fetched: to - from,
-                dimensions: 0,
-                detail: None,
-            });
-        }
-        Plan::Full { reason } => {
-            return full_reload(app, store, snapshot, &url, remote_size, etag, info.last_modified.as_deref(), &reason);
-        }
+/// Is the recorded revision the same file we are looking at?
+///
+/// A missing ETag is trusted when the size matches — the mirror does not always
+/// advertise one, and size equality is then all there is to go on.
+fn is_unchanged(prior: Option<&SnapshotState>, remote_size: u64, etag: Option<&str>) -> bool {
+    let Some(prior) = prior else {
+        return false;
+    };
+    if prior.size != remote_size {
+        return false;
+    }
+    match (etag, prior.etag.as_deref()) {
+        (Some(remote), Some(recorded)) => remote == recorded,
+        (None, _) => true,
+        (Some(_), None) => false,
     }
 }
 
-/// Decide what to do, including the cheap prefix check the append case needs.
-fn plan_for(
-    url: &str,
-    remote_size: u64,
-    etag: Option<&str>,
-    state: Option<SnapshotState>,
-) -> Result<Plan> {
-    // Only worth verifying the boundary if we are about to rely on it.
-    let head_prefix_ok = match &state {
-        Some(s) if s.offset > 0 && remote_size > s.offset => {
-            // Re-read the bytes ending just before our offset. If they still
-            // close a record, the prefix we ingested has not been rewritten and
-            // the bytes from `offset` onward are new. Either terminator counts:
-            // the feed closes about 49,700 records with a bare `CR LF`, and
-            // insisting on the `NUL CR LF` form would force a full re-ingest on
-            // every one of those boundaries.
-            let from = s.offset.saturating_sub(parser::TERM_LEN as u64);
-            match remote::get_tail(url, from) {
-                Ok(r) => {
-                    let mut buf = [0u8; parser::TERM_LEN];
-                    let n = std::io::Read::read(&mut std::io::Read::take(r, parser::TERM_LEN as u64), &mut buf)
-                        .unwrap_or(0);
-                    ingest::ends_on_boundary(&buf[..n])
-                }
-                Err(_) => false,
-            }
-        }
-        _ => true,
-    };
-    Ok(ingest::plan(remote_size, etag, state.as_ref(), head_prefix_ok))
-}
-
-/// Re-read the whole snapshot. Used on first run and whenever the delta checks
-/// fail; it clears the act table first so the result is exactly the file.
+/// Load the whole snapshot into the staging table, migrate the rows the act table
+/// is missing, then drop the staging table.
+///
+/// `ID` is the merge key: the feed is append-only in id space, so every row above
+/// the stored maximum is new. Nothing is deleted, and a refresh that brings no new
+/// acts leaves the archive exactly as it was.
 #[allow(clippy::too_many_arguments)]
-fn full_reload(
+fn import_via_staging(
     app: &AppHandle,
     store: &mut Store,
     snapshot: &SnapshotFile,
@@ -320,29 +278,44 @@ fn full_reload(
     remote_size: u64,
     etag: Option<&str>,
     last_modified: Option<&str>,
-    reason: &str,
 ) -> Result<SyncReport> {
-    log::info!("full reload of {}: {reason}", snapshot.name);
+    log::info!("importing {} ({remote_size} B)", snapshot.name);
     emit(app, "reloading", 0, 0, remote_size);
-    store.clear_acts()?;
+
+    // Fresh staging table: dropping any previous one means a run interrupted after
+    // this point can never have a half-written file merged later.
+    store.begin_import()?;
 
     let source = remote::get_all(url)?;
-    let loaded = ingest_stream(store, source, remote_size, |rows, bytes| {
+    let loaded = ingest_stream(source, remote_size, |batch| store.stage_rows(batch), |rows, bytes| {
         emit(app, "loading", rows, bytes, remote_size)
     })?;
 
-    store.commit_snapshot_progress(&snapshot.name, remote_size, store.max_act_id()?, loaded.rows)?;
-    store.upsert_snapshot_meta(&snapshot.name, remote_size, etag, last_modified)?;
-    emit(app, "done", loaded.rows, loaded.bytes, remote_size);
+    // One transaction copies the new acts and indexes exactly those rows.
+    let added = store.merge_import()?;
+    store.finish_import()?;
+
+    let total = store.act_count()?;
+    store.record_snapshot(
+        &snapshot.name,
+        remote_size,
+        etag,
+        last_modified,
+        store.max_act_id()?,
+        total,
+    )?;
+    emit(app, "done", total, loaded.bytes, remote_size);
 
     Ok(SyncReport {
         snapshot: snapshot.name.clone(),
-        action: "reloaded".into(),
-        rows_added: loaded.rows,
-        total_rows: loaded.rows,
+        action: "imported".into(),
+        rows_added: added,
+        total_rows: total,
         dimensions: 0,
         bytes_fetched: loaded.bytes,
-        detail: Some(reason.to_string()),
+        detail: None,
+        // Filled in by `refresh`, which knows the dimensions that were loaded too.
+        processed: Vec::new(),
     })
 }
 
@@ -357,15 +330,18 @@ pub struct Loaded {
     pub bytes: u64,
 }
 
-/// Stream a whole snapshot into `store`, reporting progress as it goes.
+/// Stream a whole snapshot, handing each batch of parsed rows to `on_batch` and
+/// reporting progress as it goes.
 ///
-/// Split out from [`full_reload`] so it can be exercised against a file on disk
-/// instead of the live feed — the streaming, chunk-boundary and batching
-/// behaviour is the part worth testing, not the HTTP call around it.
+/// Split out from [`import_via_staging`] so it can be exercised against a file on
+/// disk instead of the live feed — the streaming, chunk-boundary and batching
+/// behaviour is the part worth testing, not the HTTP call around it. The sink is
+/// a closure rather than a `Store` so the same streaming code can fill the act
+/// table (in tests) or the staging table (in production).
 pub fn ingest_stream<R: std::io::Read>(
-    store: &mut Store,
     mut source: R,
     total_bytes: u64,
+    mut on_batch: impl FnMut(&[parser::Row]) -> Result<()>,
     mut progress: impl FnMut(i64, u64),
 ) -> Result<Loaded> {
     // The header is one CRLF line, so by the time a full chunk has arrived its
@@ -422,7 +398,7 @@ pub fn ingest_stream<R: std::io::Read>(
         while pending.len() >= BATCH {
             let batch: Vec<parser::Row> = pending.drain(..BATCH).collect();
             loaded.rows += batch.len() as i64;
-            store.insert_rows(&batch)?;
+            on_batch(&batch)?;
             progress(loaded.rows, loaded.bytes);
         }
     }
@@ -439,7 +415,7 @@ pub fn ingest_stream<R: std::io::Read>(
 
     if !pending.is_empty() {
         loaded.rows += pending.len() as i64;
-        store.insert_rows(&pending)?;
+        on_batch(&pending)?;
     }
 
     let _ = total_bytes;
@@ -459,16 +435,36 @@ pub fn refresh(app: &AppHandle, store: &mut Store, listing: &feed::Listing) -> R
     store.save_schema_doc(&xml)?;
 
     let mut loaded = 0usize;
+    // Base names of the files ingested this run, for the explorer's badge.
+    let mut processed: Vec<String> = Vec::new();
     for d in &dimensions {
         match load_dimension(store, &d.table, &d.name) {
-            Ok(_) => loaded += 1,
+            Ok(_) => {
+                loaded += 1;
+                processed.push(d.name.clone());
+            }
             // One unreadable lookup table must not abort the whole refresh.
             Err(e) => log::warn!("dimension {} failed: {e:#}", d.table),
         }
     }
 
+    // With the dimensions fresh, repair any saved rule filter that holds a
+    // foreign-key *id* where the acts store the *name* (the feed declares one,
+    // stores the other). A failure here must not abort the sync.
+    match crate::email::normalize_related_filters(store.conn(), &schema) {
+        Ok(0) => {}
+        Ok(n) => log::info!("email: {n} regra(s) com filtro normalizado"),
+        Err(e) => log::warn!("normalizing email rule filters failed: {e:#}"),
+    }
+
     let mut report = ingest_snapshot(app, store, &snapshot)?;
     report.dimensions = loaded;
+    // The act file is recorded on every sync, including an `unchanged` one: a
+    // refresh that finds it identical has still confirmed the local copy matches
+    // it, and the badge means "when this file was last synced", not "when new
+    // acts last arrived".
+    processed.push(snapshot.name.clone());
+    report.processed = processed;
     Ok(report)
 }
 
@@ -565,8 +561,18 @@ mod tests {
 
         // Read through a reader that hands out small chunks, so records that
         // straddle a chunk boundary are actually exercised rather than
-        // accidentally landing whole.
-        let loaded = ingest_stream(&mut store, SlowReader::new(file), size, |_, _| {}).unwrap();
+        // accidentally landing whole. Stage first, then migrate — the production
+        // path, against the feed's real bytes.
+        store.begin_import().unwrap();
+        let loaded = ingest_stream(
+            SlowReader::new(file),
+            size,
+            |batch| store.stage_rows(batch),
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!(store.merge_import().unwrap(), loaded.rows, "a first import migrates every row");
+        store.finish_import().unwrap();
 
         assert_eq!(loaded.rows, store.act_count().unwrap());
         // The exact count, so a splitter that silently drops records — the
@@ -650,7 +656,8 @@ mod tests {
 
         let mut data = encoded_records(10);
         data.truncate(data.len() - 9);
-        let err = ingest_stream(&mut store, &data[..], data.len() as u64, |_, _| {}).unwrap_err();
+        let err = ingest_stream(&data[..], data.len() as u64, |batch| store.insert_rows(batch), |_, _| {})
+            .unwrap_err();
         assert!(err.to_string().contains("meio de um registro"), "{err}");
     }
 
@@ -660,11 +667,28 @@ mod tests {
         store.ensure_act_tables(&crate::store::test_schema()).unwrap();
 
         let data = encoded_records(2500);
-        let loaded = ingest_stream(&mut store, &data[..], data.len() as u64, |_, _| {}).unwrap();
+        let loaded = ingest_stream(&data[..], data.len() as u64, |batch| store.insert_rows(batch), |_, _| {})
+            .unwrap();
         assert_eq!(loaded.rows, 2500);
         assert_eq!(store.act_count().unwrap(), 2500);
         // Batching must not lose or duplicate the tail.
         assert_eq!(store.max_act_id().unwrap(), Some(2500));
+    }
+
+    #[test]
+    fn an_ingest_that_crosses_chunk_and_batch_boundaries_keeps_every_record() {
+        // 30k records span several 1 MiB reads and several 5k batches, so a record
+        // straddling a chunk boundary must still be parsed exactly once.
+        let mut store = crate::store::Store::open_in_memory().unwrap();
+        store.ensure_act_tables(&crate::store::test_schema()).unwrap();
+
+        let data = encoded_records(30_000);
+        assert!(data.len() > 1 << 20, "the fixture must span more than one chunk");
+        let loaded = ingest_stream(&data[..], data.len() as u64, |batch| store.insert_rows(batch), |_, _| {})
+            .unwrap();
+        assert_eq!(loaded.rows, 30_000);
+        assert_eq!(store.act_count().unwrap(), 30_000);
+        assert_eq!(store.max_act_id().unwrap(), Some(30_000));
     }
 
     #[test]
@@ -681,5 +705,23 @@ mod tests {
             schema.table("ATO").unwrap().columns[0].help.as_deref(),
             Some("Chave")
         );
+    }
+
+    #[test]
+    fn unchanged_requires_a_recorded_revision_of_the_same_size_and_etag() {
+        let recorded = SnapshotState {
+            size: 1000,
+            etag: Some("\"abc\"".into()),
+        };
+        // No prior import: always work to do.
+        assert!(!is_unchanged(None, 1000, Some("\"abc\"")));
+        // Same size and ETag: nothing to do.
+        assert!(is_unchanged(Some(&recorded), 1000, Some("\"abc\"")));
+        // Same size, new ETag: the file was rewritten in place.
+        assert!(!is_unchanged(Some(&recorded), 1000, Some("\"def\"")));
+        // Different size: grew or shrank.
+        assert!(!is_unchanged(Some(&recorded), 1001, Some("\"abc\"")));
+        // The mirror stopped advertising an ETag: size is all there is to go on.
+        assert!(is_unchanged(Some(&recorded), 1000, None));
     }
 }

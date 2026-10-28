@@ -1,0 +1,75 @@
+Licença MIT
+
+Copyright (c) 2026 Erick
+
+É concedida permissão, gratuitamente, a qualquer pessoa que obtenha uma cópia
+deste software e dos arquivos de documentação associados (o "Software"), para
+lidar com o Software sem restrições, incluindo, sem limitação, os direitos de
+usar, copiar, modificar, mesclar, publicar, distribuir, sublicenciar e/ou
+vender cópias do Software, bem como permitir que as pessoas a quem o Software
+é fornecido o façam, sujeitas às seguintes condições:
+
+O aviso de copyright acima e este aviso de permissão devem ser incluídos em
+todas as cópias ou partes substanciais do Software.
+
+O SOFTWARE É FORNECIDO "COMO ESTÁ" (AS IS), SEM GARANTIA DE QUALQUER TIPO,
+EXPRESSA OU IMPLÍCITA, INCLUINDO, MAS NÃO SE LIMITANDO ÀS GARANTIAS DE
+COMERCIALIZAÇÃO, ADEQUAÇÃO A UM DETERMINADO FIM E NÃO VIOLAÇÃO. EM NENHUM
+CASO OS AUTORES OU DETENTORES DOS DIREITOS AUTORAIS SERÃO RESPONSÁVEIS POR
+QUALQUER REIVINDICAÇÃO, DANO OU OUTRA RESPONSABILIDADE, SEJA EM AÇÃO
+CONTRATUAL, ILÍCITO OU DE OUTRA NATUREZA, DECORRENTE DE, FORA DE OU EM
+CONEXÃO COM O SOFTWARE OU O USO OU OUTRAS NEGOCIAÇÕES NO SOFTWARE.
+
+---
+
+AVISO ADICIONAL — USO "COMO ESTÁ"
+
+O Legisladoc Sync (o "Software") é fornecido "COMO ESTÁ" e "CONFORME
+DISPONÍVEL", sem garantia de qualquer tipo, expressa ou implícita, incluindo,
+mas não se limitando, às garantias de comercialização, adequação a um
+determinado fim, titularidade, exatidão e não violação. Todo o risco quanto à
+qualidade, ao desempenho e aos resultados obtidos com o Software é seu.
+
+Sem limitar o acima exposto, os autores e detentores dos direitos autorais não
+garantem nem declaram que:
+
+- o Software será ininterrupto, livre de erros, seguro ou livre de componentes
+  prejudiciais;
+- quaisquer dados sincronizados, baixados, indexados, armazenados ou enviados
+  por e-mail pelo Software serão exatos, completos, oportunos ou estarão
+  disponíveis;
+- defeitos no Software serão corrigidos; ou
+- o Software funcionará com qualquer hardware, sistema operacional, rede ou
+  serviço de terceiros específico.
+
+Você é o único responsável pelo uso do Software e por quaisquer consequências
+decorrentes dele, incluindo, mas não se limitando, à perda de dados,
+corrupção de arquivos locais, divulgação de credenciais ou senhas de e-mail,
+tráfego de rede e conformidade com os termos de serviço e a legislação
+aplicável a qualquer conteúdo ou servidor de terceiros acessado por meio do
+Software. Faça backup dos seus dados e revise a configuração antes do uso.
+
+Na máxima extensão permitida pela lei aplicável, em nenhuma hipótese os
+autores ou detentores dos direitos autorais serão responsáveis por qualquer
+reivindicação, dano ou outra responsabilidade, seja em ação contratual,
+ilícito ou de outra natureza, decorrente de, fora de ou em conexão com o
+Software ou o uso ou outras negociações no Software, mesmo que tenham sido
+avisados da possibilidade de tais danos.
+
+Algumas jurisdições não permitem a exclusão de determinadas garantias nem a
+limitação ou exclusão de responsabilidade por danos incidentais ou
+consequenciais, de modo que algumas das limitações ou exclusões acima podem
+não se aplicar a você. Nesse caso, a responsabilidade dos autores será
+limitada à máxima extensão permitida por lei.
+
+Este aviso é uma comunicação adicional e não modifica, substitui ou limita as
+permissões concedidas pela Licença MIT acima. Componentes de terceiros
+incluídos no Software ou usados para construí-lo são fornecidos sob suas
+próprias licenças e também são fornecidos "COMO ESTÁ", conforme indicado em
+THIRD-PARTY-NOTICES.pt-BR.md.
+
+---
+
+Nota sobre esta tradução: este documento é uma tradução para o português
+(brasileiro), fornecida apenas para conveniência e leitura. Em caso de
+divergência, ambiguidade ou disputa, prevalece a versão em inglês em LICENSE.

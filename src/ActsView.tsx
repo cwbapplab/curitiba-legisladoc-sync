@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ActDetail,
   ActQuery,
   ActRow,
   Facet,
@@ -8,7 +7,6 @@ import {
   Op,
   QueryCapabilities,
   StoreStats,
-  actDetail,
   actFacets,
   actStats,
   compactNumber,
@@ -16,6 +14,7 @@ import {
   queryCapabilities,
   searchActs,
 } from "./api";
+import { DetailDrawer } from "./ActDetailDrawer";
 import { Button, Icon, Input, Loading, Message, Select, Tag } from "./components";
 
 const PAGE_SIZE = 100;
@@ -53,6 +52,12 @@ const COLUMNS: Column[] = [
     key: "NUMERO_OFICIAL",
     label: "Nº oficial",
     className: "col-oficial",
+    numeric: true,
+  },
+  {
+    key: "DATA_CRIACAO",
+    label: "Criação",
+    className: "col-criacao",
     numeric: true,
   },
   {
@@ -238,8 +243,8 @@ export default function ActsView({ refreshToken }: Props) {
       <div className="table-wrap">
         <table className="app-table">
           <caption className="sr-only">
-            Atos publicados. As colunas Identificação, Nº oficial, Publicação e
-            Ano podem ser ordenadas.
+            Atos publicados. As colunas Identificação, Nº oficial, Criação,
+            Publicação e Ano podem ser ordenadas.
           </caption>
           <thead>
             <tr>
@@ -269,7 +274,7 @@ export default function ActsView({ refreshToken }: Props) {
               ))}
               <th className="col-tipo">Tipo</th>
               <th className="col-orgao">Órgão</th>
-              <th className="col-sumula">Ementa</th>
+              <th className="col-sumula">Resumo/Assunto do Ato</th>
             </tr>
           </thead>
           <tbody>
@@ -295,6 +300,9 @@ export default function ActsView({ refreshToken }: Props) {
                   </div>
                 </td>
                 <td className="col-oficial num">{r.numero_oficial ?? "—"}</td>
+                <td className="col-criacao num">
+                  {formatActDate(r.data_criacao)}
+                </td>
                 <td className="col-data num">
                   {formatActDate(r.data_publicacao)}
                 </td>
@@ -460,44 +468,6 @@ function FacetSelect({
   );
 }
 
-/**
- * Um campo cujo valor é HTML, mostrado como HTML.
- *
- * É o caso de `CABECALHO`: o feed publica ali o cabeçalho do documento, com
- * `<p>`, `<strong>` e — nos documentos gerados no Word — até um bloco `<style>`
- * com a formatação. Não é texto, então não pode ir para um `<dd>`: ali as tags
- * apareceriam cruas e ainda estilizariam o resto da aplicação. Vai para um
- * quadro isolado, sem scripts e sem mesma origem, como o texto do ato.
- *
- * A altura vem de uma estimativa, não de uma medida: `sandbox=""` bloqueia
- * também os scripts do próprio quadro, então ele não tem como informar a altura
- * do conteúdo — e liberar scripts só para medi-la deixaria de bloquear os
- * scripts do feed. Contar os blocos do cabeçalho basta para acertar a ordem de
- * grandeza, e o pouco que sobra rola dentro do quadro.
- */
-function HtmlField({ title, value }: { title: string; value: string | null }) {
-  if (!value) return null;
-
-  // Blocos de texto — parágrafos, quebras, divisores — e não marcações de
-  // formatação, que não ocupam linha própria.
-  const blocks = value.match(/<\/?(p|div|br|hr|h[1-6]|table|tr|li)\b/gi)?.length ?? 1;
-  // 220px acomoda os blocos de cabeçalho do Word, que têm margens generosas.
-  const height = Math.min(70 + blocks * 22, 260);
-
-  return (
-    <section className="body-section">
-      <h3>{title}</h3>
-      <iframe
-        className="act-body short"
-        title={title}
-        sandbox=""
-        style={{ height }}
-        srcDoc={value}
-      />
-    </section>
-  );
-}
-
 /** Marca interna e improvável no texto, para poupar o destaque da limpeza. */
 const MARK_OPEN = "\u0001O\u0001";
 const MARK_CLOSE = "\u0001C\u0001";
@@ -587,8 +557,8 @@ function decodeEntities(text: string): string {
  *
  * O `snippet()` do FTS5 é montado a partir do valor bruto da coluna que melhor
  * casou, e o índice cobre `CABECALHO` e `body`, cujo conteúdo é HTML. Sem esta
- * limpeza a coluna Ementa mostraria `<br>`, `&nbsp;` e — pior — pedaços de CSS
- * no meio da frase.
+ * limpeza a coluna Resumo/Assunto do Ato mostraria `<br>`, `&nbsp;` e — pior —
+ * pedaços de CSS no meio da frase.
  *
  * Os `<script>` e `<style>` saem inteiros, com o conteúdo: são justamente as
  * partes que não são texto do ato, e deixá-los faria a célula exibir regras de
@@ -612,122 +582,3 @@ function stripHtml(html: string): string {
   );
 }
 
-/** Todos os campos de um ato, com os rótulos que o próprio feed publica. */
-function DetailDrawer({ id, onClose }: { id: number; onClose: () => void }) {
-  const [detail, setDetail] = useState<ActDetail | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const closeRef = useRef<HTMLButtonElement>(null);
-
-  useEffect(() => {
-    let vivo = true;
-    setDetail(null);
-    actDetail(id)
-      .then((d) => vivo && setDetail(d))
-      .catch((e) => vivo && setError(String(e)));
-    return () => {
-      vivo = false;
-    };
-  }, [id]);
-
-  useEffect(() => {
-    closeRef.current?.focus();
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const fields = detail?.fields ?? [];
-  const identificacao = fields.find((f) =>
-    f.label.toLowerCase().includes("identificação")
-  );
-
-  return (
-    <>
-      <div className="drawer-scrim" onClick={onClose} />
-      <aside
-        className="drawer"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Detalhes do ato"
-      >
-        <header className="drawer-head">
-          <div>
-            <div className="drawer-title">
-              {identificacao?.value ?? fields[0]?.value ?? `Ato ${id}`}
-            </div>
-            <div className="drawer-sub">Registro nº {id}</div>
-          </div>
-          <span ref={closeRef as unknown as React.RefObject<HTMLSpanElement>}>
-            <Button circle ariaLabel="Fechar" onClick={onClose}>
-              <Icon name="close" />
-            </Button>
-          </span>
-        </header>
-
-        <div className="drawer-body">
-          {error && (
-            <div className="app-message">
-              <Message kind="danger">{error}</Message>
-            </div>
-          )}
-          {!detail && !error && <Loading label="Carregando o ato" />}
-          {detail && (
-            <>
-              <dl className="fields">
-                {fields
-                  // `body` e `CABECALHO` são os dois campos cujo conteúdo é
-                  // HTML, não texto — são quadros próprios abaixo, não linhas
-                  // desta lista.
-                  .filter((f) => f.column !== "body" && f.column !== "CABECALHO")
-                  .map((f) => (
-                    <div className="field" key={f.column}>
-                      <dt title={f.column}>{f.label}</dt>
-                      <dd>
-                        {f.value ? (
-                          <>
-                            <span>{f.value}</span>
-                            {f.related_value && f.related_value !== f.value && (
-                              <span className="resolved">
-                                {f.related_value}
-                              </span>
-                            )}
-                          </>
-                        ) : (
-                          <span className="muted">—</span>
-                        )}
-                      </dd>
-                    </div>
-                  ))}
-              </dl>
-
-              <HtmlField
-                title="Cabeçalho"
-                value={
-                  fields.find((f) => f.column === "CABECALHO")?.value ?? null
-                }
-              />
-
-              {detail.body && (
-                <section className="body-section">
-                  <h3>Texto do ato</h3>
-                  {/*
-                    O texto do ato é HTML vindo do feed. É renderizado num
-                    quadro isolado, sem scripts e sem mesma origem, para que uma
-                    tag de script ou um acesso à janela matriz não alcance a
-                    ponte de comandos da aplicação.
-                  */}
-                  <iframe
-                    className="act-body"
-                    title="Texto do ato"
-                    sandbox=""
-                    srcDoc={detail.body}
-                  />
-                </section>
-              )}
-            </>
-          )}
-        </div>
-      </aside>
-    </>
-  );
-}

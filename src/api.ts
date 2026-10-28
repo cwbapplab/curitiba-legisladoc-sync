@@ -8,6 +8,7 @@ export interface ActRow {
   numero_oficial: string | null;
   ano_publicacao: number | null;
   data_publicacao: string | null;
+  data_criacao: string | null;
   tipo: string | null;
   orgao: string | null;
   situacao: string | null;
@@ -100,7 +101,7 @@ export interface QueryCapabilities {
 
 export interface SyncReport {
   snapshot: string;
-  action: "unchanged" | "appended" | "reloaded" | string;
+  action: "unchanged" | "imported" | string;
   rows_added: number;
   total_rows: number;
   dimensions: number;
@@ -117,6 +118,8 @@ export interface FileRow {
   mtime: string | null;
   /** Changed within the trailing 7-day window. */
   recent: boolean;
+  /** When the app last ingested this file, or null if it is not one it reads. */
+  synced_at: string | null;
 }
 
 export interface Summary {
@@ -147,6 +150,37 @@ export interface AppSnapshot {
   interval_minutes: number;
   last_error: string | null;
   act_report: SyncReport | null;
+  /** The last manual sync's matches, for the alert area. */
+  alert: SyncAlert | null;
+}
+
+/**
+ * Acts matched by a **manual** sync, shown in the app instead of being emailed.
+ *
+ * Not an `EmailLogEntry`: a manual sync sends nothing, so it writes no history,
+ * and it carries sample acts, which the log entry has no room for.
+ */
+export interface SyncAlert {
+  /** The feed file the acts came from, e.g. `2026-10-09_Legisladoc_-_ATO_…csv`. */
+  snapshot: string;
+  max_id: number;
+  total_matched: number;
+  rules: SyncAlertRule[];
+}
+
+export interface SyncAlertRule {
+  rule_id: number;
+  rule_name: string;
+  /** The full match count, which may exceed `samples.length`. */
+  matched: number;
+  samples: SyncAlertAct[];
+}
+
+export interface SyncAlertAct {
+  id: number;
+  numero_identificacao: string | null;
+  data_publicacao: string | null;
+  tipo: string | null;
 }
 
 export interface SearchPage {
@@ -255,6 +289,9 @@ export const saveEmailSettings = (settings: EmailSettingsInput) =>
 export const testEmailConnection = () => invoke<void>("test_email_connection");
 export const sendTestEmail = (to: string) =>
   invoke<void>("send_test_email", { to });
+/** Email one act, to `;`-separated addresses, using the stored SMTP settings. */
+export const sendActEmail = (id: number, recipients: string) =>
+  invoke<void>("send_act_email", { id, recipients });
 
 export const listEmailRules = () => invoke<EmailRule[]>("list_email_rules");
 export const saveEmailRule = (rule: EmailRuleInput) =>
@@ -266,9 +303,27 @@ export const getEmailStatus = () => invoke<EmailStatus>("get_email_status");
 export const listEmailLog = (limit = 50) =>
   invoke<EmailLogEntry[]>("list_email_log", { limit });
 
-/** Manual run. `send: false` is a dry run; `sinceWatermark: false` matches all acts. */
-export const runEmailRulesNow = (send: boolean, sinceWatermark: boolean) =>
-  invoke<EmailLogEntry[]>("run_email_rules_now", { send, sinceWatermark });
+/** A rule and the acts it matched, for the simulation panel. */
+export interface RuleMatches {
+  rule: EmailRule;
+  total: number;
+  rows: ActRow[];
+}
+
+/**
+ * Simulate every enabled rule over the **whole acervo**, each with its first
+ * page of matches. `limit` is the page size. Nothing is sent and no history is
+ * written; `total` is `-1` for a rule whose filter no longer fits the data.
+ */
+export const simulateEmailRules = (limit: number) =>
+  invoke<RuleMatches[]>("simulate_email_rules", { limit });
+
+/** One page of a single rule's matches, for the panel's pager. */
+export const simulateEmailRulePage = (
+  ruleId: number,
+  offset: number,
+  limit: number
+) => invoke<RuleMatches>("simulate_email_rule_page", { ruleId, offset, limit });
 
 /* ------------------------------------------------------------- formatting -- */
 
@@ -293,27 +348,47 @@ export function compactNumber(n: number): string {
 }
 
 /**
- * Feed timestamps -> "2026-10-08" in the user's local time.
+ * Feed date -> "05/11/2019".
  *
  * Values look like `2019-11-05 00:00:00.000`: no timezone, so `new Date()` would
  * read them as UTC and shift the day for anyone west of Greenwich. The date part
- * is already what the act view shows, so it is used verbatim rather than parsed.
+ * is already what the act view shows, so it is rearranged verbatim rather than
+ * parsed.
  */
 export function formatActDate(value: string | null): string {
   if (!value) return "—";
-  const date = value.slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : value;
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : value;
 }
 
-/** RFC 3339 -> "2026-10-08 08:27" in the user's local time. */
+/** RFC 3339 -> "08/10/2026 08:27:57" in the user's local time. */
 export function formatDate(iso: string | null): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+  return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(
     d.getHours()
-  )}:${pad(d.getMinutes())}`;
+  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/**
+ * Feed value -> Brazilian datetime when it looks like one, otherwise unchanged.
+ *
+ * The act detail drawer prints the stored record verbatim, so a `DATA_PUBLICACAO`
+ * of `2019-11-05 00:00:00.000` should read as `05/11/2019 00:00:00`. The match is
+ * anchored to the start, so prose that merely contains a date is left alone, and
+ * a date with no time stays date-only.
+ */
+export function formatFeedValue(value: string | null): string {
+  if (!value) return "—";
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?/.exec(
+    value
+  );
+  if (!m) return value;
+  const [, y, mo, d, h, mi, s] = m;
+  const date = `${d}/${mo}/${y}`;
+  return h ? `${date} ${h}:${mi}:${s ?? "00"}` : date;
 }
 
 /** "há 3 minutos", para a linha de estado. */

@@ -1,10 +1,31 @@
 # Dependencies
 node_modules/
 
-# Build output
+# Build output (Vite / React front end)
 dist/
 dist-ssr/
 *.local
+
+# Build output (Rust / Tauri back end)
+src-tauri/target/
+src-tauri/vendor/**/target/
+src-tauri/gen/schemas/
+*.rs.bk
+*.pdb
+
+# Packaged installers and bundles
+*.msi
+*.msix
+*.appx
+*.dmg
+*.deb
+*.rpm
+*.AppImage
+*.nsis.zip
+*.exe
+
+# Local tool / agent state
+.commandcode/
 
 # Logs
 logs/
@@ -14,11 +35,6 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
-
-# Tauri / Rust
-src-tauri/target/
-src-tauri/gen/schemas/
-*.pdb
 
 # Test / coverage
 coverage/
