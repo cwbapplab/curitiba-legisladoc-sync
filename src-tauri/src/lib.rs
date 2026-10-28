@@ -27,6 +27,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use db::{LastSync, Summary, SyncOutcome};
@@ -594,6 +596,72 @@ async fn simulate_email_rule_page(
     .await
 }
 
+/// Tray menu item ids.
+const TRAY_OPEN: &str = "tray-open";
+const TRAY_QUIT: &str = "tray-quit";
+
+/// Bring the main window back from the tray.
+fn show_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// Tell the user the app is still running after the window is closed.
+fn notify_background(app: &AppHandle) {
+    use tauri_plugin_notification::NotificationExt;
+
+    if let Err(e) = app
+        .notification()
+        .builder()
+        .title("Legisladoc Sync")
+        .body(
+            "O aplicativo continua em segundo plano. Clique no ícone da bandeja para abrir; \
+             clique com o botão direito para sair.",
+        )
+        .show()
+    {
+        log::warn!("could not show the background notification: {e}");
+    }
+}
+
+/// Tray icon: left click opens the window, right click opens the menu.
+fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
+    let open = MenuItem::with_id(app, TRAY_OPEN, "Abrir Legisladoc Sync", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT, "Sair", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&open, &quit])?;
+
+    let mut tray = TrayIconBuilder::with_id("main")
+        .tooltip("Legisladoc Sync")
+        .menu(&menu)
+        // The menu belongs to the right button; the left one opens the app.
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            TRAY_OPEN => show_main_window(app),
+            TRAY_QUIT => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main_window(tray.app_handle());
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+
+    tray.build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -602,6 +670,18 @@ pub fn run() {
                 .level(log::LevelFilter::Info)
                 .build(),
         )
+        .plugin(tauri_plugin_notification::init())
+        .on_window_event(|window, event| {
+            // Closing the window keeps the app alive in the tray; the tray menu
+            // is the only place that really quits.
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    notify_background(window.app_handle());
+                }
+            }
+        })
         .setup(|app| {
             let dir = app.path().app_data_dir()?;
             let file = dir.join("legisladoc.sqlite");
@@ -617,6 +697,8 @@ pub fn run() {
                 last_report: Mutex::new(None),
                 last_alert: Mutex::new(None),
             });
+
+            setup_tray(app.handle())?;
 
             // Populate on first run, then keep refreshing on the configured
             // cadence. The UI loads whatever is already stored and updates when
